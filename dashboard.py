@@ -13,16 +13,16 @@ st.set_page_config(layout="wide", page_title="M2 MBFA Terminal", page_icon="📊
 
 # --- Constantes (Mises à jour avec les règles du mandat) ---
 EXCEL_URL = "https://docs.google.com/spreadsheets/d/1VqgRMRJJ3DaCYKJ1OT77LFn9ExUUifO7x3Zzqq6fmwQ/export?format=xlsx"
-MANAGEMENT_FEE_ANNUAL = 0.01 # 1%
-CASH_RATE_ANNUAL = 0.015 # 1.5%
-TRANSACTION_FEE_RATE = 0.001 # 0.10%
+MANAGEMENT_FEE_ANNUAL = 0.01 # 1% [Source: PDF page 3]
+CASH_RATE_ANNUAL = 0.015 # 1.5% [Source: PDF page 3]
+TRANSACTION_FEE_RATE = 0.001 # 0.10% [Source: PDF page 3]
 RISK_FREE_RATE_ANNUAL = 0.015 # Supposons égal au taux cash pour Sharpe
 TRADING_DAYS = 252 # Pour annualisation du risque (Vol, Sharpe, TE)
 CALENDAR_DAYS = 365 # Pour annualisation/journalisation des frais et taux cash
-BENCHMARK_WEIGHTS = {'Action': 0.60, 'Gov bond': 0.20, 'Commodities': 0.15, 'Cash': 0.05} #
-START_DATE_SIMULATION = pd.to_datetime('2025-10-06') #
-INITIAL_NAV_EUR = 100_000_000 # 100M €
-CASH_TICKER_NAME = "CASH EUR"
+BENCHMARK_WEIGHTS = {'Action': 0.60, 'Gov bond': 0.20, 'Commodities': 0.15, 'Cash': 0.05} # [Source: PDF page 2]
+START_DATE_SIMULATION = pd.to_datetime('2025-10-06') # [Source: PDF page 4]
+INITIAL_NAV_EUR = 100_000_000 # 100M € [Source: PDF page 1]
+CASH_TICKER_NAME = "CASH EUR" # [Source: PDF page 2]
 
 # Palette Bloomberg authentique
 COLORS = {
@@ -139,7 +139,7 @@ custom_css = f"""
 """
 st.markdown(custom_css, unsafe_allow_html=True)
 
-# --- Fonctions Utilitaires --- (Inchangées)
+# --- Fonctions Utilitaires ---
 
 def calculate_daily_rates():
     """Calcule les taux journaliers en base 365."""
@@ -260,7 +260,6 @@ def calculate_full_period_indicators(benchmark_df, prices_hist, returns_full):
     tickers = get_tickers_by_class(benchmark_df, prices_hist.columns)
     all_tickers = tickers['action'] + tickers['bond'] + tickers['commodity']
     if not all_tickers: st.error("No valid asset tickers found."); return None, None, None, None
-    # S'assurer que l'index est bien une chaîne avant de mapper
     benchmark_df_indexed = benchmark_df.set_index(benchmark_df['BBG Ticker'].astype(str))
     asset_class_map = benchmark_df_indexed['Asset Class']
 
@@ -287,59 +286,70 @@ def calculate_full_period_indicators(benchmark_df, prices_hist, returns_full):
         vol = ind['Volatilité']; var = ind['VaR 99%']; sharpe = ind['Sharpe']
         corr = np.nan; beta = np.nan; bench_vals = bench_returns.loc[common_idx]
         if np.isfinite(bench_vals).all() and np.isfinite(Y_aligned).all():
-            # Utilisation ddof=0 pour population std dev si on considère les données comme la population entière
             if bench_vals.std(ddof=0) != 0 and Y_aligned.std(ddof=0) != 0:
                  with warnings.catch_warnings(): warnings.simplefilter("ignore"); corr = np.corrcoef(bench_vals, Y_aligned)[0, 1]
             if X_aligned.std(ddof=0) != 0:
                 try: model = LinearRegression(); model.fit(X_aligned, Y_aligned); beta = model.coef_[0]
-                except ValueError: beta = 0.0 # Cas où X ou Y sont constants
+                except ValueError: beta = 0.0
 
-        # Récupération de la classe d'actif via .get() pour éviter KeyError si ticker inconnu
         asset_class = asset_class_map.get(ticker, 'N/A')
         indicators_list.append({'Ticker': ticker, 'Asset Class': asset_class, 'Volatilite Annuelle': vol, 'Beta (vs Benchmark)': beta, 'Correlation (vs Benchmark)': corr, 'VaR 99% (1 jour)': var, 'Sharpe Ratio Annuel': sharpe})
 
     indicators_df = pd.DataFrame(indicators_list); corr_matrix = returns_aligned.corr()
     return indicators_df, corr_matrix, bench_indicators_full, asset_class_map
 
-
 #@st.cache_data # Cache peut être problématique ici
-def calculate_current_weights_and_drift(initial_weights_df, benchmark_df, prices_hist):
-    """Calcule les poids courants et la dérive par rapport aux poids initiaux."""
-    if initial_weights_df is None or benchmark_df is None or prices_hist is None or prices_hist.empty:
+def calculate_active_weights(portfolio_weights_df, benchmark_df, prices_hist):
+    """Calcule les poids courants du portefeuille et les poids actifs par rapport au benchmark."""
+    # ... (fonction inchangée depuis v2.8) ...
+    if portfolio_weights_df is None or benchmark_df is None or prices_hist is None or prices_hist.empty:
         return None
 
     try:
-        # S'assurer que START_DATE_SIMULATION est dans l'index des prix ou trouver la plus proche
         if START_DATE_SIMULATION not in prices_hist.index:
             actual_start_prices_date = prices_hist[prices_hist.index >= START_DATE_SIMULATION].index.min()
             if pd.isna(actual_start_prices_date):
                  st.error(f"Cannot find prices at or after simulation start date {START_DATE_SIMULATION.strftime('%Y-%m-%d')}")
                  return None
             start_prices = prices_hist.loc[actual_start_prices_date]
-            #st.warning(f"Using prices from {actual_start_prices_date.strftime('%Y-%m-%d')} as start date was not found.") # Optionnel
         else:
              start_prices = prices_hist.loc[START_DATE_SIMULATION]
 
         latest_prices = prices_hist.iloc[-1]
 
-        initial_weights_df['BBG Ticker'] = initial_weights_df['BBG Ticker'].astype(str)
+        portfolio_weights_df['BBG Ticker'] = portfolio_weights_df['BBG Ticker'].astype(str)
         benchmark_df['BBG Ticker'] = benchmark_df['BBG Ticker'].astype(str)
 
-        weights_with_class = initial_weights_df.merge(
-            benchmark_df[['BBG Ticker', 'Asset Class']],
-            on='BBG Ticker',
-            how='left'
+        # 1. Calculer les poids benchmark théoriques
+        benchmark_composition = {}
+        tickers_by_class = get_tickers_by_class(benchmark_df, benchmark_df['BBG Ticker'].unique())
+        for class_name, weight_total in BENCHMARK_WEIGHTS.items():
+             if class_name.lower() == 'cash':
+                 benchmark_composition[CASH_TICKER_NAME] = weight_total
+             else:
+                 class_key = 'action' if class_name == 'Action' else \
+                             'bond' if class_name == 'Gov bond' else \
+                             'commodity' if class_name == 'Commodities' else None
+                 if class_key and tickers_by_class[class_key]:
+                     num_assets = len(tickers_by_class[class_key])
+                     weight_per_asset = weight_total / num_assets if num_assets > 0 else 0
+                     for ticker in tickers_by_class[class_key]:
+                         benchmark_composition[ticker] = weight_per_asset
+        benchmark_weights_series = pd.Series(benchmark_composition, name="Benchmark Weight")
+
+        # 2. Calculer les poids courants du portefeuille
+        weights_with_class = portfolio_weights_df.merge(
+            benchmark_df[['BBG Ticker', 'Asset Class']], on='BBG Ticker', how='left'
         )
 
-        drift_data = []
+        active_weight_data = []
         total_current_value = 0
-
         start_fx = start_prices.get('EURUSD Curncy', np.nan)
         latest_fx = latest_prices.get('EURUSD Curncy', np.nan)
 
         for _, row in weights_with_class.iterrows():
             ticker = str(row['BBG Ticker'])
-            initial_weight = row['Weight']
+            initial_weight = row['Weight'] # Poids initial du PORTEFEUILLE
             asset_class = row['Asset Class'] if pd.notna(row['Asset Class']) else ('Cash' if CASH_TICKER_NAME.lower() == ticker.lower() else 'Unknown')
 
             initial_alloc_eur = initial_weight * INITIAL_NAV_EUR
@@ -347,12 +357,9 @@ def calculate_current_weights_and_drift(initial_weights_df, benchmark_df, prices
             if ticker.lower() == CASH_TICKER_NAME.lower():
                 init_qty = initial_alloc_eur
                 current_value = initial_alloc_eur
-                start_price = 1.0
-                latest_price = 1.0
             elif ticker in start_prices.index and ticker in latest_prices.index and pd.notna(start_prices[ticker]) and start_prices[ticker] != 0:
                 start_price = start_prices[ticker]
                 latest_price = latest_prices[ticker]
-
                 if asset_class == 'Commodities' and pd.notna(start_fx) and start_fx != 0 and pd.notna(latest_fx):
                      initial_alloc_usd = initial_alloc_eur / start_fx
                      init_qty = initial_alloc_usd / start_price if start_price != 0 else 0
@@ -361,41 +368,52 @@ def calculate_current_weights_and_drift(initial_weights_df, benchmark_df, prices
                 else:
                     init_qty = initial_alloc_eur / start_price if start_price != 0 else 0
                     current_value = init_qty * latest_price
-
             else:
-                init_qty = 0
                 current_value = 0
-                start_price = np.nan
-                latest_price = np.nan
 
             if pd.notna(current_value):
                  total_current_value += current_value
 
-            drift_data.append({
+            active_weight_data.append({
                 'Asset Class': asset_class, 'BBG Ticker': ticker,
-                'Initial Weight': initial_weight, 'Current Value (EUR)': current_value
+                'Current Value (EUR)': current_value
             })
 
-        drift_df = pd.DataFrame(drift_data)
+        active_weight_df = pd.DataFrame(active_weight_data)
 
         if total_current_value != 0:
-            drift_df['Current Weight'] = drift_df['Current Value (EUR)'] / total_current_value
+            active_weight_df['Current Weight'] = active_weight_df['Current Value (EUR)'] / total_current_value
         else:
-            drift_df['Current Weight'] = 0.0
+            active_weight_df['Current Weight'] = 0.0
 
-        drift_df['Drift'] = drift_df['Current Weight'] - drift_df['Initial Weight']
+        # 3. Fusionner avec les poids benchmark et calculer poids actif
+        active_weight_df = active_weight_df.set_index('BBG Ticker')
+        combined_df = pd.concat([benchmark_weights_series, active_weight_df[['Asset Class', 'Current Weight']]], axis=1)
+        combined_df['Benchmark Weight'] = combined_df['Benchmark Weight'].fillna(0)
+        combined_df['Current Weight'] = combined_df['Current Weight'].fillna(0)
+        # Remplir Asset Class pour ceux qui sont dans benchmark mais pas dans portefeuille
+        if not isinstance(benchmark_df.index, pd.Index) or benchmark_df.index.name != 'BBG Ticker':
+             benchmark_df_indexed_active = benchmark_df.set_index('BBG Ticker')
+        else:
+             benchmark_df_indexed_active = benchmark_df
+        combined_df['Asset Class'] = combined_df['Asset Class'].fillna(benchmark_df_indexed_active['Asset Class'])
+        combined_df['Asset Class'] = combined_df['Asset Class'].fillna('Unknown') # Fallback
 
-        drift_df_final = drift_df[[
-            'Asset Class', 'BBG Ticker', 'Initial Weight', 'Current Weight', 'Drift'
-        ]].copy()
+        combined_df['Active Weight'] = combined_df['Current Weight'] - combined_df['Benchmark Weight']
 
-        return drift_df_final
+        active_weight_final = combined_df[[
+            'Asset Class', 'Benchmark Weight', 'Current Weight', 'Active Weight'
+        ]].reset_index().rename(columns={'index': 'BBG Ticker'}).copy()
+        active_weight_final.loc[active_weight_final['BBG Ticker'].str.lower() == CASH_TICKER_NAME.lower(), 'Asset Class'] = 'Cash'
+
+
+        return active_weight_final
 
     except KeyError as e:
-         st.error(f"Error calculating drift: Missing data for ticker {e} on start or latest date.")
+         st.error(f"Error calculating active weights: Missing data for ticker {e} on start or latest date.")
          return None
     except Exception as e:
-        st.error(f"Error calculating allocation drift: {e}")
+        st.error(f"Error calculating active weights: {e}")
         return None
 
 def calculate_simulation_performance(portfolio_df, benchmark_df, returns_all, start_date):
@@ -455,7 +473,7 @@ def calculate_simulation_performance(portfolio_df, benchmark_df, returns_all, st
          benchmark_df_indexed_contrib = benchmark_df.set_index(benchmark_df['BBG Ticker'].astype(str))
     else: benchmark_df_indexed_contrib = benchmark_df
     asset_class_map_contrib = benchmark_df_indexed_contrib['Asset Class']
-    sim_period_returns_contrib = returns_sim[returns_sim.index >= start_date] # Contribution depuis start_date
+    sim_period_returns_contrib = returns_sim[returns_sim.index >= start_date]
 
     for ticker, initial_weight in weights_dict.items():
         ticker_str = str(ticker)
@@ -476,11 +494,10 @@ def calculate_simulation_performance(portfolio_df, benchmark_df, returns_all, st
         pnl_contributions.append({'Asset Class': asset_class, 'P&L Contribution (Base 100)': pnl})
 
     contribution_df = pd.DataFrame(pnl_contributions)
-    # S'assurer que 'Asset Class' est bien la colonne pour groupby
     if 'Asset Class' in contribution_df.columns:
         contribution_by_class = contribution_df.groupby('Asset Class')['P&L Contribution (Base 100)'].sum().reset_index()
     else:
-        contribution_by_class = pd.DataFrame(columns=['Asset Class', 'P&L Contribution (Base 100)']) # DataFrame vide
+        contribution_by_class = pd.DataFrame(columns=['Asset Class', 'P&L Contribution (Base 100)'])
 
 
     # --- Indicateurs & TE ---
@@ -494,7 +511,6 @@ def calculate_simulation_performance(portfolio_df, benchmark_df, returns_all, st
         sim_indicators['portfolio'] = calculate_indicators(port_rets_stats, rf_daily_365)
         if len(bench_rets_stats) >= 2:
             common_te_index = bench_rets_stats.index.intersection(port_rets_stats.index)
-            # S'assurer qu'il y a des données communes pour calculer diff
             if not common_te_index.empty:
                 diff = port_rets_stats.loc[common_te_index] - bench_rets_stats.loc[common_te_index]
                 if len(diff) >= 2:
@@ -504,7 +520,6 @@ def calculate_simulation_performance(portfolio_df, benchmark_df, returns_all, st
                         te_series = diff.rolling(window=window).std() * np.sqrt(TRADING_DAYS)
                         te_series = te_series.dropna(); te_series.name = "Tracking Error (60j)"
                         if not te_series.empty: avg_te = te_series.mean()
-            # else: avg_te = np.nan # Pas de données communes
 
     comparison = pd.DataFrame({'Benchmark': nav_bench, 'Votre Fonds (Net)': nav_portfolio})
     if start_date in comparison.index: comparison.loc[start_date] = 100.0
@@ -531,7 +546,8 @@ with st.spinner("LOADING MARKET DATA... PLEASE WAIT..."):
     if prices_hist is None or returns_all is None: st.error("Failed to process price data."); st.stop()
     indicators_full, corr_matrix, bench_indicators_full, asset_map = calculate_full_period_indicators(benchmark_df, prices_hist, returns_all)
     if indicators_full is None: st.error("Failed to calculate full period indicators."); st.stop()
-    drift_df = calculate_current_weights_and_drift(portfolio_df, benchmark_df, prices_hist)
+    # --- Appel nouvelle fonction ---
+    active_weight_df = calculate_active_weights(portfolio_df, benchmark_df, prices_hist)
 
 
 # --- Market Movers Ticker HTML Generation --- (Inchangé)
@@ -634,6 +650,7 @@ with tab1:
     # Quick Stats Section (inchangé)
     st.markdown("### QUICK STATS")
     if comparison is not None and not comparison.empty:
+        # ... (code inchangé) ...
         try:
             latest_nav_bench = comparison['Benchmark'].iloc[-1]
             latest_nav_port = comparison['Votre Fonds (Net)'].iloc[-1]
@@ -657,17 +674,13 @@ with tab1:
         st.warning("Quick Stats unavailable (no simulation data).")
     st.markdown("---")
 
-
-    # --- MODIFIED: Section Contribution à la Performance ---
+    # Section Contribution à la Performance (inchangé)
     st.markdown("### PERFORMANCE CONTRIBUTION (GROSS, BASE 100)")
     if contribution_by_class is not None and not contribution_by_class.empty:
-         # S'assurer que les colonnes nécessaires existent
          if 'Asset Class' in contribution_by_class.columns and 'P&L Contribution (Base 100)' in contribution_by_class.columns:
-              # Utiliser directement le DataFrame avec les colonnes spécifiées pour le bar chart
-              # Streamlit choisira les couleurs par défaut basées sur 'Asset Class'
-              st.bar_chart(contribution_by_class.set_index('Asset Class')['P&L Contribution (Base 100)']) # Index par Asset Class
+              contrib_chart_data = contribution_by_class.set_index('Asset Class')
+              st.bar_chart(contrib_chart_data['P&L Contribution (Base 100)'])
 
-              # Afficher le tableau récapitulatif
               st.dataframe(contribution_by_class.style.format({'P&L Contribution (Base 100)': '{:+.2f}'}), use_container_width=True)
               st.caption("Contribution based on initial weights and cumulative gross asset returns (fees excluded).")
          else:
@@ -675,8 +688,6 @@ with tab1:
     else:
          st.warning("Performance contribution data unavailable.")
     st.markdown("---")
-    # --- FIN MODIFICATION ---
-
 
     if sim_ind:
         st.markdown("### KEY PERFORMANCE INDICATORS (SIMULATION PERIOD)")
@@ -755,12 +766,12 @@ with tab2:
         st.markdown("---")
         col_left, col_right = st.columns([2, 1])
         with col_left:
-            st.markdown("#### POSITION DETAILS")
+            st.markdown("#### CURRENT POSITION DETAILS")
             df_display = pd.concat([non_cash_weights, cash_row]).reset_index(drop=True)
             styled_df = df_display.style.format({'Weight': '{:.2%}'}).background_gradient(subset=['Weight'], cmap='YlOrRd', vmin=0, vmax=max(0.01, df_display['Weight'].max()))
             st.dataframe(styled_df, use_container_width=True, height=400)
         with col_right:
-            st.markdown("#### ASSET CLASS BREAKDOWN")
+            st.markdown("#### CURRENT ASSET CLASS BREAKDOWN")
             if 'Asset Class' in display_weights.columns:
                 class_weights = non_cash_weights.groupby('Asset Class')['Weight'].sum().sort_values(ascending=False);
                 for asset_class, weight in class_weights.items(): st.metric(asset_class.upper(), f"{weight:.2%}")
@@ -768,43 +779,43 @@ with tab2:
             else: st.warning("Asset class data unavailable")
         st.markdown("---")
 
-# --- Section Allocation Drift ---
-        st.markdown("### ALLOCATION DRIFT ANALYSIS")
-        if drift_df is not None:
-            latest_drift_date = prices_hist.index[-1].strftime('%d %b %Y') if prices_hist is not None else "N/A"
-            st.caption(f"Comparison of current weights (as of {latest_drift_date}) vs initial weights at start.")
+        # --- Section Active Weight ---
+        st.markdown("### ACTIVE WEIGHT ANALYSIS (vs Benchmark)")
+        if active_weight_df is not None:
+            latest_active_date = prices_hist.index[-1].strftime('%d %b %Y') if prices_hist is not None else "N/A"
+            st.caption(f"Comparison of current portfolio weights vs benchmark weights (as of {latest_active_date}).")
 
-            # --- MODIFIED: Correction application style pour Styler ---
-            def color_drift_styler(val):
-                """Applies color based on drift value for Styler."""
-                if pd.isna(val):
-                    return '' # No style for NaN
-                # Seuil plus petit pour colorer même les petites dérives
-                threshold = 0.0001
+            def color_active_weight_styler(val):
+                """Applies color based on active weight value for Styler."""
+                if pd.isna(val): return ''
+                threshold = 0.0001 # 0.01% threshold
                 color = COLORS['danger'] if val < -threshold else COLORS['success'] if val > threshold else COLORS['text_secondary']
                 return f'color: {color}; font-weight: bold;'
 
-            styled_drift_df = drift_df.style.format({
-                'Initial Weight': '{:.2%}',
+            active_weight_display = active_weight_df[
+                (abs(active_weight_df['Benchmark Weight']) > 1e-6) | (abs(active_weight_df['Current Weight']) > 1e-6)
+            ].copy()
+
+            styled_active_df = active_weight_display.style.format({
+                'Benchmark Weight': '{:.2%}',
                 'Current Weight': '{:.2%}',
-                'Drift': '{:+.2%}' # Ajoute le signe + ou -
-            }).apply(lambda s: s.map(color_drift_styler), subset=['Drift']) # Use apply with map on subset 'Drift'
-            # --- FIN MODIFICATION ---
+                'Active Weight': '{:+.2%}'
+            }).apply(lambda s: s.map(color_active_weight_styler), subset=['Active Weight'])
 
-            st.dataframe(styled_drift_df, use_container_width=True, height=450)
+            st.dataframe(styled_active_df, use_container_width=True, height=450)
 
-            st.markdown("#### DRIFT VISUALIZATION (vs Initial)")
-            # --- MODIFIED: Simplification pour st.bar_chart ---
-            # Préparer les données (index=Ticker, valeur=Drift)
-            drift_chart_data = drift_df.set_index('BBG Ticker')['Drift']
-            # Ne pas passer l'argument color pour laisser Streamlit gérer
-            st.bar_chart(drift_chart_data)
-            # --- FIN MODIFICATION ---
-
+            st.markdown("#### ACTIVE WEIGHT VISUALIZATION")
+            active_chart_data = active_weight_display[abs(active_weight_display['Active Weight']) > 1e-6].set_index('BBG Ticker')['Active Weight']
+            if not active_chart_data.empty:
+                # --- CORRECTION: Remove color argument ---
+                st.bar_chart(active_chart_data)
+                # --- FIN CORRECTION ---
+            else:
+                st.info("No significant active weights to display.")
         else:
-            st.warning("Allocation drift data unavailable.")
+            st.warning("Active weight data unavailable.")
         st.markdown("---")
-        # --- FIN Section Allocation Drift ---
+        # --- FIN Section Active Weight ---
 
 
         st.markdown("### ALLOCATION VISUALIZATION (Current)")
@@ -868,7 +879,7 @@ with tab3:
             ).background_gradient(
                 subset=['Volatilite Annuelle'], cmap='Reds', vmin=0, vmax=max(0.01, filtered_df['Volatilite Annuelle'].max()) if not filtered_df.empty else 1
             ).background_gradient(
-                 subset=['Beta (vs Benchmark)'], cmap='coolwarm', vmin=min(0, filtered_df['Beta (vs Benchmark)'].min()), vmax=max(1.5, filtered_df['Beta (vs Benchmark)'].max())
+                 subset=['Beta (vs Benchmark)'], cmap='coolwarm', vmin=min(0, filtered_df['Beta (vs Benchmark)'].min()) if not filtered_df.empty else 0, vmax=max(1.5, filtered_df['Beta (vs Benchmark)'].max()) if not filtered_df.empty else 1.5
             ).background_gradient(
                  subset=['Correlation (vs Benchmark)'], cmap='coolwarm', vmin=-1, vmax=1
             )
@@ -931,4 +942,4 @@ st.markdown("---")
 col1, col2, col3 = st.columns(3)
 with col1: st.caption("M2 MBFA TERMINAL")
 with col2: st.caption(f"{datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
-with col3: st.caption("v2.7 DRIFT FIX") # Version mise à jour
+with col3: st.caption("v2.8 ACTIVE WEIGHT") # Version mise à jour
