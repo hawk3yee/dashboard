@@ -155,11 +155,14 @@ custom_css = f"""
         height: 35px;
     }}
     .ticker-content {{
-        display: inline-block;
+        display: flex;
         white-space: nowrap;
-        animation: scroll-left 40s linear infinite;
-        position: absolute;
-        left: 0;
+        animation: scroll-ticker 45s linear infinite;
+    }}
+    .ticker-item {{
+        display: inline-flex;
+        align-items: center;
+        flex-shrink: 0;
     }}
     .ticker-content .ticker {{
         background: {COLORS['bg_dark']};
@@ -178,16 +181,18 @@ custom_css = f"""
         font-weight: 700;
         font-size: 0.9rem;
         text-shadow: 0 0 5px {COLORS['success']};
+        margin-right: 1.5rem;
     }}
     .price-down {{ 
         color: {COLORS['danger']}; 
         font-weight: 700;
         font-size: 0.9rem;
         text-shadow: 0 0 5px {COLORS['danger']};
+        margin-right: 1.5rem;
     }}
-    @keyframes scroll-left {{ 
-        0% {{ transform: translateX(100%); }} 
-        100% {{ transform: translateX(-100%); }} 
+    @keyframes scroll-ticker {{ 
+        0% {{ transform: translateX(0); }} 
+        100% {{ transform: translateX(-50%); }} 
     }}
 
     /* === TABS STYLE BLOOMBERG === */
@@ -960,7 +965,6 @@ def calculate_active_weights(portfolio_weights_df, benchmark_df, prices_hist):
 
 def calculate_simulation_performance(portfolio_df, benchmark_df, returns_all, start_date):
     """Calcule les performances de simulation, gérant le cash explicite ET les frais, ET la contribution."""
-    # ... (fonction inchangée depuis v2.5) ...
     if portfolio_df is None or benchmark_df is None or returns_all is None: return None, None, None, None, None
     returns_sim = returns_all[returns_all.index >= start_date].copy()
     if returns_sim.empty: st.warning(f"No data since {start_date.strftime('%Y-%m-%d')}."); return None, None, None, None, None
@@ -1048,85 +1052,54 @@ def calculate_simulation_performance(portfolio_df, benchmark_df, returns_all, st
     else:
         contribution_by_class = pd.DataFrame(columns=['Asset Class', 'P&L Contribution (Base 100)'])
 
-    # --- Indicateurs & TE ---
+    # --- MODIFICATION: Calcul Ratio d'Information au lieu de TE ---
     portfolio_returns_net = nav_portfolio.pct_change().fillna(0)
-    sim_indicators = {"benchmark": {}, "portfolio": {}}; te_series = None; avg_te = np.nan
+    sim_indicators = {"benchmark": {}, "portfolio": {}}
+    ir_series = None  # Remplace te_series
+    avg_ir = np.nan  # Remplace avg_te
+    
     bench_rets_stats = bench_returns_gross[bench_returns_gross.index > start_date]
     port_rets_stats = portfolio_returns_net[portfolio_returns_net.index > start_date]
 
     if len(bench_rets_stats) >= 1:
         sim_indicators['benchmark'] = calculate_indicators(bench_rets_stats, rf_daily_365)
         sim_indicators['portfolio'] = calculate_indicators(port_rets_stats, rf_daily_365)
+        
         if len(bench_rets_stats) >= 2:
-            common_te_index = bench_rets_stats.index.intersection(port_rets_stats.index)
-            if not common_te_index.empty:
-                diff = port_rets_stats.loc[common_te_index] - bench_rets_stats.loc[common_te_index]
-                if len(diff) >= 2:
-                    avg_te = diff.std() * np.sqrt(TRADING_DAYS)
+            common_ir_index = bench_rets_stats.index.intersection(port_rets_stats.index)
+            if not common_ir_index.empty:
+                # Calcul des rendements actifs (excédents)
+                active_returns = port_rets_stats.loc[common_ir_index] - bench_rets_stats.loc[common_ir_index]
+                
+                if len(active_returns) >= 2:
+                    # Ratio d'Information = Mean(Active Returns) / Std(Active Returns) * sqrt(252)
+                    mean_active = active_returns.mean()
+                    std_active = active_returns.std()
+                    
+                    if std_active != 0 and pd.notna(std_active):
+                        avg_ir = (mean_active / std_active) * np.sqrt(TRADING_DAYS)
+                    
+                    # Calcul du RI roulant sur 60 jours
                     window = 60
-                    if len(diff) >= window:
-                        te_series = diff.rolling(window=window).std() * np.sqrt(TRADING_DAYS)
-                        te_series = te_series.dropna(); te_series.name = "Tracking Error (60j)"
-                        if not te_series.empty: avg_te = te_series.mean()
+                    if len(active_returns) >= window:
+                        rolling_mean = active_returns.rolling(window=window).mean()
+                        rolling_std = active_returns.rolling(window=window).std()
+                        
+                        # Éviter division par zéro
+                        ir_series = (rolling_mean / rolling_std) * np.sqrt(TRADING_DAYS)
+                        ir_series = ir_series.replace([np.inf, -np.inf], np.nan).dropna()
+                        ir_series.name = "Information Ratio (60j)"
+                        
+                        if not ir_series.empty:
+                            avg_ir = ir_series.mean()
 
     comparison = pd.DataFrame({'Benchmark': nav_bench, 'Votre Fonds (Net)': nav_portfolio})
     if start_date in comparison.index: comparison.loc[start_date] = 100.0
     else: comparison.loc[start_date] = 100.0; comparison = comparison.sort_index()
     comparison = comparison.ffill()
 
-    return comparison, sim_indicators, te_series, avg_te, contribution_by_class
-
-# --- Fonction Simulation Performance Spécifique ---
-def simulate_portfolio_performance(portfolio_weights_dict, returns_all, start_date):
-    """Calcule la performance simulée NETTE pour une allocation donnée."""
-    # ... (fonction inchangée depuis v2.9) ...
-    if not portfolio_weights_dict or returns_all is None: return None, None
-    returns_sim = returns_all[returns_all.index >= start_date].copy()
-    if returns_sim.empty: return None, None
-
-    cash_daily_365, rf_daily_365, mgmt_fee_daily_365 = calculate_daily_rates()
-
-    portfolio_returns_gross_sim = pd.Series(0.0, index=returns_sim.index)
-    cash_weight_sim = 0.0
-
-    for ticker, weight in portfolio_weights_dict.items():
-        ticker_str = str(ticker)
-        if CASH_TICKER_NAME.lower() == ticker_str.lower():
-            cash_weight_sim = weight
-        elif ticker_str in returns_sim.columns:
-             valid_returns = returns_sim[ticker_str].fillna(0)
-             if pd.notna(weight): portfolio_returns_gross_sim += valid_returns * weight
-
-    portfolio_returns_gross_sim += cash_weight_sim * cash_daily_365
-
-    if start_date not in portfolio_returns_gross_sim.index:
-        portfolio_returns_gross_sim.loc[start_date] = 0.0
-        portfolio_returns_gross_sim = portfolio_returns_gross_sim.sort_index()
-
-    nav_portfolio_sim = pd.Series(index=portfolio_returns_gross_sim.index, dtype=float)
-    nav_portfolio_sim.loc[start_date] = 100.0
-    start_loc = portfolio_returns_gross_sim.index.get_loc(start_date)
-    for i in range(start_loc + 1, len(portfolio_returns_gross_sim)):
-        current_date = portfolio_returns_gross_sim.index[i]
-        previous_date = portfolio_returns_gross_sim.index[i-1]
-        prev_nav = nav_portfolio_sim.loc[previous_date] if previous_date in nav_portfolio_sim.index else nav_portfolio_sim.iloc[i-1]
-        daily_gross_return = portfolio_returns_gross_sim.loc[current_date]
-        current_nav = prev_nav * (1 + daily_gross_return) * (1 - mgmt_fee_daily_365)
-        nav_portfolio_sim.loc[current_date] = current_nav
-    nav_portfolio_sim.name = "Simulated Portfolio (Net)"
-    nav_portfolio_sim = nav_portfolio_sim.ffill()
-
-    portfolio_returns_net_sim = nav_portfolio_sim.pct_change().fillna(0)
-    port_rets_stats_sim = portfolio_returns_net_sim[portfolio_returns_net_sim.index > start_date]
-
-    sim_indicators_opt = {}
-    if len(port_rets_stats_sim) >= 1:
-        sim_indicators_opt = calculate_indicators(port_rets_stats_sim, rf_daily_365)
-    else:
-        sim_indicators_opt = {'Volatilité': np.nan, 'Sharpe': np.nan, 'VaR 99%': np.nan}
-
-    return nav_portfolio_sim, sim_indicators_opt
-
+    # Retourne ir_series et avg_ir au lieu de te_series et avg_te
+    return comparison, sim_indicators, ir_series, avg_ir, contribution_by_class
 
 # --- Interface ---
 
@@ -1183,23 +1156,19 @@ if returns_all is not None and not returns_all.empty:
             ticker_html += f"<span class='ticker-label'>📈 MOUVEMENTS DU MARCHÉ | {latest_date.strftime('%d %B %Y')}</span>"
             ticker_html += "<div class='ticker-wrap'><div class='ticker-content'>"
             
-            # Création d'une boucle pour répéter le contenu et assurer le scroll continu
-            ticker_segment = ""
-            ticker_segment += f"<strong style='color: {COLORS['success']};'>PLUS FORTES HAUSSES:</strong> "
-            gainer_strings = []
+            # Création du contenu
+            ticker_segment = "<div class='ticker-item'>"
+            ticker_segment += f"<strong style='color: {COLORS['success']};'>PLUS FORTES HAUSSES:</strong>&nbsp;&nbsp;"
             for ticker, val in top_gainers.items():
-                 gainer_strings.append(f"<span class='ticker'>{ticker}</span> <span class='price-up'>{val:+.2%}</span>")
-            ticker_segment += "&nbsp;|&nbsp;".join(gainer_strings)
+                 ticker_segment += f"<span class='ticker'>{ticker}</span>&nbsp;<span class='price-up'>{val:+.2%}</span>"
             
-            ticker_segment += f"&nbsp;&nbsp;&nbsp;&nbsp;<strong style='color: {COLORS['danger']};'>PLUS FORTES BAISSES:</strong> "
-            loser_strings = []
+            ticker_segment += f"&nbsp;&nbsp;<strong style='color: {COLORS['danger']};'>PLUS FORTES BAISSES:</strong>&nbsp;&nbsp;"
             for ticker, val in top_losers.items():
-                 loser_strings.append(f"<span class='ticker'>{ticker}</span> <span class='price-down'>{val:+.2%}</span>")
-            ticker_segment += "&nbsp;|&nbsp;".join(loser_strings)
-            ticker_segment += "&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"
+                 ticker_segment += f"<span class='ticker'>{ticker}</span>&nbsp;<span class='price-down'>{val:+.2%}</span>"
+            ticker_segment += "</div>"
             
-            # Répéter 3 fois pour assurer le scroll continu
-            ticker_html += ticker_segment * 3
+            # Dupliquer le contenu pour un défilement continu sans coupure
+            ticker_html += ticker_segment + ticker_segment
             
             ticker_html += "</div></div></div>"
             st.markdown(ticker_html, unsafe_allow_html=True)
@@ -1261,7 +1230,11 @@ tab1, tab2, tab3 = st.tabs(["📊 SUIVI", "📋 POSITIONS", "📈 ANALYTICS"])
 # --- TAB 1: SUIVI (Traduction française) ---
 with tab1:
     st.markdown(f"## 📊 ANALYSE DE PERFORMANCE: {START_DATE_SIMULATION.strftime('%d/%m/%Y')} - AUJOURD'HUI")
-    comparison, sim_ind, te_series, avg_te, contribution_by_class = calculate_simulation_performance(portfolio_df, benchmark_df, returns_all, START_DATE_SIMULATION)
+    
+    # MODIFICATION: Renommer les variables retournées
+    comparison, sim_ind, ir_series, avg_ir, contribution_by_class = calculate_simulation_performance(
+        portfolio_df, benchmark_df, returns_all, START_DATE_SIMULATION
+    )
 
     st.markdown("### 🎯 INDICATEURS RAPIDES")
     if comparison is not None and not comparison.empty:
@@ -1322,11 +1295,13 @@ with tab1:
         col3.metric("VAR 99%", f"{bench_indicators_full['VaR 99% (1 jour)']:.2%}" if pd.notna(bench_indicators_full['VaR 99% (1 jour)']) else "N/A")
     st.markdown("---")
 
-    st.markdown("### 📈 GRAPHIQUE DE PERFORMANCE & TRACKING ERROR")
+    # MODIFICATION: Graphique avec Ratio d'Information
+    st.markdown("### 📈 GRAPHIQUE DE PERFORMANCE & RATIO D'INFORMATION")
     if comparison is not None:
         fig, ax1 = plt.subplots(figsize=(14, 7))
         fig.patch.set_facecolor(COLORS['bg_dark'])
         ax1.set_facecolor(COLORS['bg_panel'])
+
         ax1.plot(comparison.index, comparison['Benchmark'], color=COLORS['blue_bright'], linewidth=2.5, linestyle='--', label='BENCHMARK (BRUT)', alpha=0.9)
         ax1.plot(comparison.index, comparison['Votre Fonds (Net)'], color=COLORS['accent_orange'], linewidth=2.5, label='PORTEFEUILLE (NET)', alpha=0.9)
         ax1.set_ylabel("VL (BASE 100)", fontsize=11, fontweight='600', color=COLORS['text_primary'], fontfamily='monospace')
@@ -1342,28 +1317,76 @@ with tab1:
         ax1.spines['top'].set_color(COLORS['border'])
         ax1.spines['left'].set_color(COLORS['border'])
         ax1.spines['right'].set_color(COLORS['border'])
+        
+        # Axe secondaire pour le Ratio d'Information
         ax2 = ax1.twinx()
-        ax2.set_ylabel('TRACKING ERROR (ANN %)', fontsize=11, fontweight='600', color=COLORS['accent_yellow'], fontfamily='monospace')
+        ax2.set_ylabel('RATIO D\'INFORMATION (ANN.)', fontsize=11, fontweight='600', color=COLORS['accent_yellow'], fontfamily='monospace')
         ax2.tick_params(axis='y', labelcolor=COLORS['accent_yellow'], colors=COLORS['accent_yellow'])
-        ax2.yaxis.set_major_formatter(mtick.PercentFormatter(xmax=1.0))
-        lines = []; labels = []; lines1, labels1 = ax1.get_legend_handles_labels(); lines.extend(lines1); labels.extend(labels1)
-        if te_series is not None and not te_series.empty:
-            te_plot = te_series
-            line_te, = ax2.plot(te_plot.index, te_plot, color=COLORS['accent_yellow'], linewidth=2, label='TE 60D', alpha=0.8)
-            lines.append(line_te); labels.append(f'TE {TRADING_DAYS}D ANN. (60D ROLL)'); max_te_val = te_plot.max(); ax2.set_ylim(0, max(0.05, np.ceil((max_te_val if pd.notna(max_te_val) else 0)*100)/100 + 0.01))
-        elif not np.isnan(avg_te) and avg_te >= 0:
-            line_te = ax2.axhline(avg_te, color=COLORS['accent_yellow'], linestyle=':', linewidth=2, label=f'AVG TE ({avg_te:.2%})', alpha=0.8)
-            lines.append(line_te); labels.append(f'AVG TE ({avg_te:.2%})'); ax2.set_ylim(0, max(0.05, np.ceil(avg_te*100)/100 + 0.01))
-        else: ax2.set_yticks([])
+        
+        lines = []; labels = []
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines.extend(lines1); labels.extend(labels1)
+        
+        if ir_series is not None and not ir_series.empty:
+            ir_plot = ir_series
+            line_ir, = ax2.plot(ir_plot.index, ir_plot, color=COLORS['accent_yellow'], linewidth=2, label='RI 60J', alpha=0.8)
+            lines.append(line_ir)
+            labels.append(f'RATIO D\'INFO. (60J ROLL)')
+            
+            # Ajuster les limites y pour le RI (typiquement entre -2 et 2)
+            max_ir_val = ir_plot.max()
+            min_ir_val = ir_plot.min()
+            y_range = max(abs(max_ir_val), abs(min_ir_val)) if pd.notna(max_ir_val) and pd.notna(min_ir_val) else 1.5
+            ax2.set_ylim(-y_range * 1.2, y_range * 1.2)
+            
+            # Ligne horizontale à 0
+            ax2.axhline(0, color=COLORS['text_secondary'], linestyle=':', linewidth=1, alpha=0.5)
+            
+        elif not np.isnan(avg_ir):
+            line_ir = ax2.axhline(avg_ir, color=COLORS['accent_yellow'], linestyle=':', linewidth=2, label=f'RI MOY ({avg_ir:.2f})', alpha=0.8)
+            lines.append(line_ir)
+            labels.append(f'RI MOYEN ({avg_ir:.2f})')
+            ax2.set_ylim(-2, 2)
+            ax2.axhline(0, color=COLORS['text_secondary'], linestyle=':', linewidth=1, alpha=0.5)
+        else:
+            ax2.set_yticks([])
+
         ax1.legend(lines, labels, loc='upper left', frameon=True, facecolor=COLORS['bg_panel'], edgecolor=COLORS['border'], fontsize=9, labelcolor=COLORS['text_primary'])
-        plt.title("SUIVI DE PERFORMANCE (PORTEFEUILLE NET vs BENCHMARK BRUT)", fontsize=13, fontweight='700', pad=15, color=COLORS['accent_orange'], fontfamily='monospace')
+        plt.title("SUIVI DE PERFORMANCE & RATIO D'INFORMATION (PORTEFEUILLE NET vs BENCHMARK BRUT)", fontsize=13, fontweight='700', pad=15, color=COLORS['accent_orange'], fontfamily='monospace')
         plt.xticks(rotation=45, fontsize=8)
         fig.tight_layout()
         st.pyplot(fig)
-        if not np.isnan(avg_te):
+        
+        # Affichage métrique RI moyenne
+        if not np.isnan(avg_ir):
             col1, col2, col3 = st.columns([1, 1, 1])
             with col2:
-                st.metric("TRACKING ERROR MOYEN", f"{avg_te:.2%}", help=f"Tracking Error annualisé ({TRADING_DAYS}j) sur fenêtre glissante 60j")
+                # Déterminer la couleur selon la performance
+                ir_color = COLORS['success'] if avg_ir > 0.5 else COLORS['accent_yellow'] if avg_ir > 0 else COLORS['danger']
+                st.markdown(f"""
+                <div style='text-align: center; padding: 1.5rem; background: linear-gradient(135deg, {COLORS['bg_panel']} 0%, {COLORS['bg_secondary']} 100%); 
+                            border: 2px solid {ir_color}; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.5);'>
+                    <p style='color: {COLORS['accent_yellow']}; font-size: 0.7rem; font-weight: 700; letter-spacing: 0.2em; margin-bottom: 0.5rem;'>
+                        RATIO D'INFORMATION MOYEN
+                    </p>
+                    <p style='color: {ir_color}; font-size: 2.5rem; font-weight: 800; margin: 0; text-shadow: 0 0 10px {ir_color};'>
+                        {avg_ir:.3f}
+                    </p>
+                    <p style='color: {COLORS['text_secondary']}; font-size: 0.75rem; margin-top: 0.5rem;'>
+                        Annualisé ({TRADING_DAYS}j) | Fenêtre 60j
+                    </p>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # Interprétation pédagogique
+                if avg_ir > 0.5:
+                    st.success("✅ **EXCELLENT** : Le portefeuille génère une surperformance significative ajustée du risque actif.")
+                elif avg_ir > 0:
+                    st.info("📊 **POSITIF** : Le portefeuille surperforme le benchmark de manière constante.")
+                elif avg_ir > -0.5:
+                    st.warning("⚠️ **SOUS-PERFORMANCE** : Le portefeuille sous-performe légèrement le benchmark.")
+                else:
+                    st.error("❌ **ATTENTION** : Sous-performance importante par rapport au benchmark.")
     else:
         st.warning("DONNÉES DE SIMULATION INDISPONIBLES")
 
@@ -1564,7 +1587,7 @@ st.markdown(f"""
 <div class="footer-terminal">
     <strong>M2 MBFA TERMINAL</strong> | SYSTÈME D'ANALYSE DE PORTEFEUILLE PROFESSIONNEL<br>
     SESSION: {datetime.now().strftime('%d/%m/%Y %H:%M:%S UTC')} | 
-    VERSION: <strong>v3.3 ÉDITION FRANÇAISE PREMIUM</strong><br>
+    VERSION: <strong>v3.4 ÉDITION FRANÇAISE PREMIUM | RATIO D'INFORMATION</strong><br>
     © 2025 | Tous droits réservés
 </div>
 """, unsafe_allow_html=True)
