@@ -7,6 +7,18 @@ import io
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
 from datetime import datetime
+import os
+import re # Pour le parsing (bien que nous le remplacions)
+
+# --- NOUVEAU: Import de Scipy pour l'optimisation ---
+try:
+    import scipy.optimize as sco
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+    st.warning("Module 'scipy' non trouvé. L'optimisation automatique est désactivée. Passage en mode manuel.")
+# --- FIN NOUVEAU ---
+
 
 # --- Configuration & CSS ---
 st.set_page_config(layout="wide", page_title="M2 MBFA Terminal", page_icon="📊", initial_sidebar_state="expanded")
@@ -23,6 +35,7 @@ BENCHMARK_WEIGHTS = {'Action': 0.60, 'Gov bond': 0.20, 'Commodities': 0.15, 'Cas
 START_DATE_SIMULATION = pd.to_datetime('2025-10-06') # [Source: PDF page 4]
 INITIAL_NAV_EUR = 100_000_000 # 100M € [Source: PDF page 1]
 CASH_TICKER_NAME = "CASH EUR" # [Source: PDF page 2]
+ASSET_WEIGHT_LIMIT = 0.10 # Limite de 10% par actif
 
 # Palette Bloomberg authentique
 COLORS = {
@@ -32,109 +45,536 @@ COLORS = {
     'border': '#1F2A5C', 'grid': '#1A2347', 'blue_bright': '#0068ff'
 }
 
-# --- CSS Style Bloomberg ---
+# --- CSS REFONTE PROFESSIONNELLE FRANÇAISE ---
 custom_css = f"""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap');
-    /* Global */
-    .main {{ background-color: {COLORS['bg_dark']}; color: {COLORS['text_primary']}; }}
-    .block-container {{ padding: 1.5rem 2rem; max-width: 100%; }}
-    * {{ font-family: 'Inter', sans-serif; }}
-    /* Headers Bloomberg Style */
-    .bloomberg-header {{ background: linear-gradient(90deg, {COLORS['bg_dark']} 0%, {COLORS['bg_panel']} 50%, {COLORS['bg_dark']} 100%); padding: 1.2rem 2rem; border-left: 5px solid {COLORS['accent_orange']}; border-bottom: 2px solid {COLORS['accent_orange']}; margin-bottom: 1.5rem; box-shadow: 0 2px 20px rgba(251, 139, 30, 0.3); }}
-    .bloomberg-header h1 {{ color: {COLORS['accent_orange']}; font-family: 'Roboto Mono', monospace; font-weight: 700; font-size: 2.2rem; margin: 0; letter-spacing: 0.15em; text-transform: uppercase; text-shadow: 0 0 10px rgba(251, 139, 30, 0.5); }}
-    .bloomberg-header .subtitle {{ color: {COLORS['text_secondary']}; font-size: 0.85rem; margin-top: 0.5rem; letter-spacing: 0.08em; font-family: 'Roboto Mono', monospace; }}
+    @import url('https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;500;600;700&family=Inter:wght@300;400;500;600;700;800&display=swap');
+    
+    /* === GLOBAL === */
+    .main {{ 
+        background: linear-gradient(135deg, {COLORS['bg_dark']} 0%, #050A1E 100%);
+        color: {COLORS['text_primary']}; 
+        font-family: 'Inter', sans-serif;
+    }}
+    .block-container {{ 
+        padding: 1rem 3rem 3rem 3rem; 
+        max-width: 100%; 
+    }}
+    
+    /* === HEADER PROFESSIONNEL === */
+    .bloomberg-header {{
+        background: linear-gradient(90deg, rgba(251,139,30,0.15) 0%, rgba(0,104,255,0.1) 50%, rgba(251,139,30,0.15) 100%);
+        border: 2px solid {COLORS['accent_orange']};
+        border-left: 6px solid {COLORS['accent_orange']};
+        padding: 2rem 3rem;
+        margin-bottom: 2rem;
+        box-shadow: 0 4px 30px rgba(251, 139, 30, 0.4), inset 0 1px 0 rgba(255,255,255,0.1);
+        position: relative;
+        overflow: hidden;
+    }}
+    .bloomberg-header::before {{
+        content: '';
+        position: absolute;
+        top: 0; left: 0;
+        width: 100%; height: 100%;
+        background: repeating-linear-gradient(
+            0deg,
+            transparent,
+            transparent 2px,
+            rgba(251,139,30,0.03) 2px,
+            rgba(251,139,30,0.03) 4px
+        );
+        pointer-events: none;
+    }}
+    .bloomberg-header h1 {{
+        color: {COLORS['accent_orange']};
+        font-family: 'Roboto Mono', monospace;
+        font-weight: 800;
+        font-size: 2.8rem;
+        margin: 0;
+        letter-spacing: 0.2em;
+        text-transform: uppercase;
+        text-shadow: 0 0 20px rgba(251, 139, 30, 0.6), 0 0 40px rgba(251, 139, 30, 0.3);
+        line-height: 1.1;
+    }}
+    .bloomberg-header .subtitle {{
+        color: {COLORS['text_secondary']};
+        font-size: 0.95rem;
+        margin-top: 1rem;
+        letter-spacing: 0.15em;
+        font-weight: 500;
+        text-transform: uppercase;
+    }}
+    .bloomberg-header .session-info {{
+        position: absolute;
+        top: 1.5rem;
+        right: 2rem;
+        background: rgba(0,0,0,0.4);
+        padding: 0.5rem 1rem;
+        border-radius: 4px;
+        border: 1px solid {COLORS['border']};
+    }}
+    .session-info .live-indicator {{
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        background: {COLORS['success']};
+        border-radius: 50%;
+        margin-right: 0.5rem;
+        animation: pulse 2s infinite;
+    }}
+    @keyframes pulse {{
+        0%, 100% {{ opacity: 1; }}
+        50% {{ opacity: 0.3; }}
+    }}
 
-    /* Market Ticker Bar */
+    /* === MARKET TICKER AMÉLIORÉ === */
     .market-ticker {{
-        background: {COLORS['bg_panel']}; border: 1px solid {COLORS['border']}; border-left: 3px solid {COLORS['success']};
-        padding: 0.8rem 1rem; margin-bottom: 1.5rem; font-family: 'Roboto Mono', monospace;
-        overflow: hidden; white-space: nowrap; box-sizing: border-box; position: relative;
+        background: linear-gradient(90deg, {COLORS['bg_panel']} 0%, {COLORS['bg_secondary']} 50%, {COLORS['bg_panel']} 100%);
+        border: 2px solid {COLORS['border']};
+        border-left: 4px solid {COLORS['success']};
+        padding: 1rem 1.5rem;
+        margin-bottom: 2rem;
+        box-shadow: 0 2px 15px rgba(0,0,0,0.5);
+        position: relative;
+        overflow: hidden;
     }}
-    .ticker-label {{ color: {COLORS['text_secondary']}; font-size: 0.75rem; display: block; margin-bottom: 0.4rem; white-space: normal; }}
-    .ticker-wrap {{ overflow: hidden; width: 100%; display: block; }}
-    .ticker-content {{ display: inline-block; padding-left: 100%; animation: scroll-left 35s linear infinite; white-space: nowrap; }}
-    .ticker-content span {{ color: #FFF; font-size: 0.85rem; vertical-align: middle; }}
-    .ticker-content strong {{ vertical-align: middle; }}
-    .ticker-content .ticker {{ vertical-align: middle; margin: 0 0.2rem; }}
-    .ticker-content .price-up, .ticker-content .price-down {{ vertical-align: middle; margin-right: 0.5rem; }}
-    @keyframes scroll-left {{ 0% {{ transform: translateX(0%); }} 100% {{ transform: translateX(-100%); }} }}
+    .ticker-label {{
+        color: {COLORS['accent_yellow']};
+        font-size: 0.7rem;
+        font-weight: 700;
+        letter-spacing: 0.15em;
+        margin-bottom: 0.7rem;
+        display: block;
+        font-family: 'Roboto Mono', monospace;
+    }}
+    .ticker-wrap {{
+        overflow: hidden;
+        position: relative;
+        width: 100%;
+        height: 35px;
+    }}
+    .ticker-content {{
+        display: inline-block;
+        white-space: nowrap;
+        animation: scroll-left 40s linear infinite;
+        position: absolute;
+        left: 0;
+    }}
+    .ticker-content .ticker {{
+        background: {COLORS['bg_dark']};
+        color: {COLORS['accent_yellow']};
+        padding: 0.3rem 0.7rem;
+        margin: 0 0.5rem;
+        border: 1px solid {COLORS['accent_yellow']};
+        font-family: 'Roboto Mono', monospace;
+        font-weight: 700;
+        font-size: 0.8rem;
+        display: inline-block;
+        box-shadow: 0 0 10px rgba(255,184,28,0.3);
+    }}
+    .price-up {{ 
+        color: {COLORS['success']}; 
+        font-weight: 700;
+        font-size: 0.9rem;
+        text-shadow: 0 0 5px {COLORS['success']};
+    }}
+    .price-down {{ 
+        color: {COLORS['danger']}; 
+        font-weight: 700;
+        font-size: 0.9rem;
+        text-shadow: 0 0 5px {COLORS['danger']};
+    }}
+    @keyframes scroll-left {{ 
+        0% {{ transform: translateX(100%); }} 
+        100% {{ transform: translateX(-100%); }} 
+    }}
 
-    /* Tabs Bloomberg */
-    [data-baseweb="tab-list"] {{ background-color: {COLORS['bg_dark']}; border-bottom: 3px solid {COLORS['accent_orange']}; padding: 0; gap: 0; border-radius: 0; margin-bottom: 2rem; }}
-    button[data-baseweb="tab"] {{ background-color: {COLORS['bg_dark']}; border: none; border-right: 1px solid {COLORS['border']}; color: {COLORS['text_secondary']}; font-family: 'Roboto Mono', monospace; font-weight: 600; font-size: 0.9rem; letter-spacing: 0.12em; text-transform: uppercase; padding: 1.2rem 2.5rem; transition: all 0.2s ease; }}
-    button[data-baseweb="tab"][aria-selected="true"] {{ background-color: {COLORS['accent_orange']}; color: {COLORS['bg_dark']}; border-bottom: none; box-shadow: 0 0 20px rgba(251, 139, 30, 0.5); font-weight: 700; }}
-    button[data-baseweb="tab"]:hover:not([aria-selected="true"]) {{ background-color: {COLORS['bg_panel']}; color: {COLORS['text_primary']}; border-bottom: 2px solid {COLORS['accent_orange']}; }}
+    /* === TABS STYLE BLOOMBERG === */
+    [data-baseweb="tab-list"] {{
+        background: {COLORS['bg_dark']};
+        border-bottom: 3px solid {COLORS['accent_orange']};
+        padding: 0;
+        gap: 0;
+        margin-bottom: 2.5rem;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.5);
+    }}
+    button[data-baseweb="tab"] {{
+        background: linear-gradient(180deg, {COLORS['bg_secondary']} 0%, {COLORS['bg_dark']} 100%);
+        border: none;
+        border-right: 1px solid {COLORS['border']};
+        color: {COLORS['text_secondary']};
+        font-family: 'Roboto Mono', monospace;
+        font-weight: 600;
+        font-size: 0.85rem;
+        letter-spacing: 0.15em;
+        text-transform: uppercase;
+        padding: 1.5rem 3rem;
+        transition: all 0.3s ease;
+        position: relative;
+    }}
+    button[data-baseweb="tab"]::before {{
+        content: '';
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        width: 0;
+        height: 3px;
+        background: {COLORS['accent_orange']};
+        transition: width 0.3s ease;
+    }}
+    button[data-baseweb="tab"][aria-selected="true"] {{
+        background: linear-gradient(180deg, {COLORS['accent_orange']} 0%, rgba(251,139,30,0.8) 100%);
+        color: {COLORS['bg_dark']};
+        font-weight: 800;
+        box-shadow: 0 0 30px rgba(251, 139, 30, 0.6);
+        border-bottom: none;
+    }}
+    button[data-baseweb="tab"][aria-selected="true"]::before {{
+        width: 100%;
+    }}
+    button[data-baseweb="tab"]:hover:not([aria-selected="true"]) {{
+        background: {COLORS['bg_panel']};
+        color: {COLORS['text_primary']};
+        transform: translateY(-2px);
+    }}
 
-    /* Metrics Bloomberg Style */
+    /* === METRICS CARDS PREMIUM === */
     [data-testid="stMetric"] {{
-        background: {COLORS['bg_panel']}; padding: 1.2rem 1.5rem; border: 2px solid {COLORS['border']};
-        border-left: 4px solid {COLORS['accent_orange']}; border-radius: 0;
-        box-shadow: 0 0 15px rgba(0, 0, 0, 0.8); transition: all 0.3s ease;
-        margin-bottom: 1rem;
+        background: linear-gradient(135deg, {COLORS['bg_panel']} 0%, {COLORS['bg_secondary']} 100%);
+        padding: 1.5rem 2rem;
+        border: 2px solid {COLORS['border']};
+        border-left: 5px solid {COLORS['accent_orange']};
+        border-radius: 8px;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.05);
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        position: relative;
+        overflow: hidden;
     }}
-    [data-testid="stMetric"]:hover {{ border-left-color: {COLORS['success']}; border-left-width: 6px; box-shadow: 0 0 25px rgba(251, 139, 30, 0.4); transform: translateX(3px); background: {COLORS['bg_secondary']}; }}
-    [data-testid="stMetric"] > label {{ color: {COLORS['text_secondary']} !important; font-family: 'Roboto Mono', monospace; font-weight: 700; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.15em; margin-bottom: 0.7rem; display: flex; justify-content: center; }}
-    [data-testid="stMetric"] [data-testid="stMetricValue"] {{ color: {COLORS['text_primary']} !important; font-family: 'Roboto Mono', monospace; font-weight: 700; font-size: 2rem; text-shadow: 0 0 5px rgba(255, 255, 255, 0.3); display: flex; justify-content: center; }}
-    [data-testid="stMetric"] [data-testid="stMetricDelta"] {{ display: flex; justify-content: center; }}
+    [data-testid="stMetric"]::after {{
+        content: '';
+        position: absolute;
+        top: -50%;
+        right: -50%;
+        width: 200%;
+        height: 200%;
+        background: radial-gradient(circle, rgba(251,139,30,0.1) 0%, transparent 70%);
+        opacity: 0;
+        transition: opacity 0.3s ease;
+    }}
+    [data-testid="stMetric"]:hover {{
+        border-left-width: 8px;
+        border-left-color: {COLORS['success']};
+        transform: translateX(5px) scale(1.02);
+        box-shadow: 0 6px 30px rgba(251, 139, 30, 0.5);
+    }}
+    [data-testid="stMetric"]:hover::after {{
+        opacity: 1;
+    }}
+    [data-testid="stMetric"] > label {{
+        color: {COLORS['accent_yellow']} !important;
+        font-family: 'Roboto Mono', monospace;
+        font-weight: 700;
+        font-size: 0.7rem;
+        text-transform: uppercase;
+        letter-spacing: 0.2em;
+        margin-bottom: 1rem;
+        display: block;
+        text-align: center;
+    }}
+    [data-testid="stMetric"] [data-testid="stMetricValue"] {{
+        color: {COLORS['text_primary']} !important;
+        font-family: 'Roboto Mono', monospace;
+        font-weight: 800;
+        font-size: 2.2rem;
+        text-shadow: 0 0 10px rgba(255,255,255,0.3);
+        text-align: center;
+        display: block;
+        letter-spacing: 0.05em;
+    }}
+    [data-testid="stMetric"] [data-testid="stMetricDelta"] {{
+        font-size: 0.95rem;
+        font-weight: 600;
+        text-align: center;
+        display: block;
+        margin-top: 0.5rem;
+    }}
 
-    /* Section Titles */
+    /* === SECTION HEADERS === */
     h2 {{
-        color: {COLORS['accent_orange']}; text-transform: uppercase; text-align: center;
-        border-bottom: 2px solid {COLORS['accent_orange']}; border-left: none;
-        padding-bottom: 0.8rem; padding-left: 0;
-        margin: 3rem 0 2rem 0; font-size: 1.7rem;
-        font-family: 'Roboto Mono', monospace; letter-spacing: 0.1em;
+        color: {COLORS['accent_orange']};
+        font-family: 'Roboto Mono', monospace;
+        font-weight: 800;
+        font-size: 1.8rem;
+        text-transform: uppercase;
+        letter-spacing: 0.15em;
+        text-align: center;
+        border-bottom: 3px solid {COLORS['accent_orange']};
+        padding-bottom: 1rem;
+        margin: 3.5rem 0 2.5rem 0;
+        text-shadow: 0 0 15px rgba(251, 139, 30, 0.5);
+        position: relative;
+    }}
+    h2::before {{
+        content: '◆';
+        position: absolute;
+        left: 50%;
+        bottom: -1.2rem;
+        transform: translateX(-50%);
+        color: {COLORS['accent_orange']};
+        font-size: 1.2rem;
     }}
     h3 {{
-        color: {COLORS['blue_bright']}; text-align: center; font-size: 1.3rem;
-        margin-top: 2.5rem; margin-bottom: 1.5rem;
-        padding-bottom: 0.6rem; border-bottom: 1px solid {COLORS['border']};
-        font-family: 'Roboto Mono', monospace; letter-spacing: 0.08em;
+        color: {COLORS['blue_bright']};
+        font-family: 'Roboto Mono', monospace;
+        font-weight: 700;
+        font-size: 1.4rem;
+        text-align: center;
+        margin: 2.5rem 0 1.5rem 0;
+        padding-bottom: 0.8rem;
+        border-bottom: 2px solid {COLORS['blue_bright']};
+        letter-spacing: 0.1em;
+        text-shadow: 0 0 10px rgba(0, 104, 255, 0.4);
     }}
     h4 {{
-        color: {COLORS['text_secondary']}; font-size: 0.95rem; text-transform: uppercase;
-        letter-spacing: 0.08em; font-family: 'Roboto Mono', monospace;
-        text-align: center; margin-bottom: 1rem;
+        color: {COLORS['accent_yellow']};
+        font-family: 'Roboto Mono', monospace;
+        font-weight: 600;
+        font-size: 0.95rem;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        text-align: center;
+        margin: 1.5rem 0 1rem 0;
+        padding: 0.5rem 1rem;
+        background: rgba(255,184,28,0.1);
+        border-left: 3px solid {COLORS['accent_yellow']};
     }}
 
-    /* Sidebar */
-    [data-testid="stSidebar"] {{ background: linear-gradient(180deg, {COLORS['bg_secondary']} 0%, {COLORS['bg_dark']} 100%); border-right: 2px solid {COLORS['border']}; }}
-    [data-testid="stSidebar"] h3 {{ color: {COLORS['accent_orange']}; font-size: 1.1rem; border-bottom: 1px solid {COLORS['accent_orange']}; padding-bottom: 0.5rem; margin-bottom: 1rem; }}
-    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] {{ color: {COLORS['text_primary']}; }}
-    /* Expanders */
-    [data-testid="stExpander"] {{ background-color: {COLORS['bg_panel']}; border: 1px solid {COLORS['border']}; border-left: 3px solid {COLORS['blue_bright']}; border-radius: 0; margin-bottom: 1rem; }}
-    [data-testid="stExpander"] summary {{ color: {COLORS['text_primary']}; font-family: 'Roboto Mono', monospace; font-weight: 600; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; }}
+    /* === SIDEBAR PREMIUM === */
+    [data-testid="stSidebar"] {{
+        background: linear-gradient(180deg, {COLORS['bg_secondary']} 0%, {COLORS['bg_dark']} 100%);
+        border-right: 3px solid {COLORS['border']};
+        box-shadow: 3px 0 20px rgba(0,0,0,0.5);
+    }}
+    [data-testid="stSidebar"] h3 {{
+        color: {COLORS['accent_orange']};
+        font-size: 1rem;
+        border-bottom: 2px solid {COLORS['accent_orange']};
+        padding-bottom: 0.8rem;
+        margin: 1.5rem 0 1rem 0;
+        text-align: left;
+        text-shadow: none;
+    }}
+    [data-testid="stSidebar"] h3::before {{
+        content: '▸ ';
+        color: {COLORS['success']};
+    }}
 
-    /* DataFrames */
-    .stDataFrame {{ margin-bottom: 2rem; }}
-    [data-testid="stDataFrame"] table thead tr th {{ background-color: {COLORS['bg_dark']} !important; color: {COLORS['accent_orange']} !important; font-weight: 700; font-size: 0.75rem; text-transform: uppercase; border-bottom: 2px solid {COLORS['accent_orange']}; }}
-    [data-testid="stDataFrame"] table tbody tr:hover {{ background-color: {COLORS['bg_secondary']}; }}
+    /* === EXPANDERS === */
+    [data-testid="stExpander"] {{
+        background: {COLORS['bg_panel']};
+        border: 2px solid {COLORS['border']};
+        border-left: 4px solid {COLORS['blue_bright']};
+        border-radius: 6px;
+        margin-bottom: 1rem;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.4);
+    }}
+    [data-testid="stExpander"] summary {{
+        color: {COLORS['text_primary']};
+        font-family: 'Roboto Mono', monospace;
+        font-weight: 700;
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        padding: 1rem 1.5rem;
+        background: rgba(0,104,255,0.1);
+    }}
+    [data-testid="stExpander"] summary:hover {{
+        background: rgba(0,104,255,0.2);
+    }}
 
-    /* Bloomberg Panel Style */
+    /* === DATAFRAMES === */
+    [data-testid="stDataFrame"] {{
+        border: 2px solid {COLORS['border']};
+        border-radius: 8px;
+        overflow: hidden;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+    }}
+    [data-testid="stDataFrame"] table thead tr th {{
+        background: linear-gradient(180deg, {COLORS['bg_dark']} 0%, {COLORS['bg_secondary']} 100%) !important;
+        color: {COLORS['accent_orange']} !important;
+        font-weight: 800;
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        border-bottom: 3px solid {COLORS['accent_orange']};
+        padding: 1rem 0.8rem !important;
+        font-family: 'Roboto Mono', monospace;
+    }}
+    [data-testid="stDataFrame"] table tbody tr {{
+        transition: all 0.2s ease;
+    }}
+    [data-testid="stDataFrame"] table tbody tr:hover {{
+        background: {COLORS['bg_secondary']} !important;
+        transform: scale(1.01);
+    }}
+    [data-testid="stDataFrame"] table tbody tr td {{
+        padding: 0.8rem !important;
+        font-family: 'Roboto Mono', monospace;
+        font-size: 0.85rem;
+    }}
+
+    /* === PANEL BLOOMBERG === */
     .bloomberg-panel {{
-        background: {COLORS['bg_panel']}; border: 2px solid {COLORS['border']};
-        border-left: 4px solid {COLORS['blue_bright']}; padding: 1.5rem;
-        margin-bottom: 1.5rem; box-shadow: 0 2px 15px rgba(0, 0, 0, 0.6);
+        background: linear-gradient(135deg, {COLORS['bg_panel']} 0%, {COLORS['bg_secondary']} 100%);
+        border: 2px solid {COLORS['border']};
+        border-left: 5px solid {COLORS['blue_bright']};
+        padding: 2rem;
+        margin-bottom: 2rem;
+        box-shadow: 0 4px 25px rgba(0,0,0,0.6);
+        border-radius: 8px;
     }}
-    .bloomberg-panel h4 {{ text-align: left; margin-bottom: 1rem; margin-top: 0; border-bottom: none; }}
+    .bloomberg-panel h4 {{
+        color: {COLORS['accent_orange']};
+        font-size: 1.1rem;
+        font-weight: 700;
+        margin-bottom: 1.5rem;
+        text-align: left;
+        border-bottom: 2px solid {COLORS['accent_orange']};
+        padding-bottom: 0.8rem;
+    }}
+    .bloomberg-panel ul {{
+        list-style: none;
+        padding-left: 0;
+    }}
+    .bloomberg-panel ul li {{
+        padding: 0.6rem 0;
+        border-bottom: 1px solid {COLORS['border']};
+        font-size: 0.9rem;
+        line-height: 1.6;
+    }}
+    .bloomberg-panel ul li:last-child {{
+        border-bottom: none;
+    }}
+    .bloomberg-panel ul li strong {{
+        color: {COLORS['accent_yellow']};
+        font-weight: 700;
+    }}
 
-    /* Graphiques */
-    .stpyplot {{ margin-bottom: 2rem; }}
-    .stBarChart {{ margin-bottom: 2rem; }}
+    /* === PROGRESS BAR === */
+    .progress-container {{
+        margin-bottom: 1rem;
+    }}
+    .progress-label {{
+        display: flex;
+        justify-content: space-between;
+        margin-bottom: 0.5rem;
+        font-family: 'Roboto Mono', monospace;
+    }}
+    .progress-label-text {{
+        color: {COLORS['text_secondary']};
+        font-size: 0.75rem;
+        font-weight: 700;
+        letter-spacing: 0.15em;
+    }}
+    .progress-value {{
+        font-size: 0.85rem;
+        font-weight: 800;
+    }}
+    .progress-bar-bg {{
+        background: rgba(10,14,39,0.8);
+        height: 10px;
+        border: 1px solid {COLORS['border']};
+        border-radius: 5px;
+        overflow: hidden;
+        box-shadow: inset 0 2px 5px rgba(0,0,0,0.5);
+    }}
+    .progress-bar-fill {{
+        height: 100%;
+        transition: width 0.5s ease, background 0.3s ease;
+        box-shadow: 0 0 10px currentColor;
+    }}
 
-    /* Ticker Style */
-    .ticker {{ font-family: 'Roboto Mono', monospace; color: {COLORS['accent_yellow']}; font-weight: 700; background-color: {COLORS['bg_dark']}; padding: 0.2rem 0.5rem; border: 1px solid {COLORS['border']}; display: inline-block; margin: 0 0.3rem; vertical-align: middle; }}
-    /* Price up/down styles */
-    .price-up {{ color: {COLORS['success']}; font-weight: 700; }}
-    .price-down {{ color: {COLORS['danger']}; font-weight: 700; }}
-    /* Progress Bar Style */
-    /* ... */
-    /* Separators */
-    hr {{ border: none; border-top: 1px solid {COLORS['border']}; margin: 2.5rem 0; }}
-    /* Paragraphs */
-    p {{ color: {COLORS['text_primary']}; line-height: 1.6; }}
-    .caption {{ color: {COLORS['text_secondary']}; font-family: 'Roboto Mono', monospace; font-size: 0.75rem; }}
+    /* === BUTTONS === */
+    .stDownloadButton button {{
+        background: linear-gradient(135deg, {COLORS['blue_bright']} 0%, {COLORS['accent_orange']} 100%);
+        color: white;
+        font-family: 'Roboto Mono', monospace;
+        font-weight: 700;
+        font-size: 0.85rem;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        padding: 0.8rem 2rem;
+        border: 2px solid {COLORS['blue_bright']};
+        border-radius: 6px;
+        transition: all 0.3s ease;
+        box-shadow: 0 4px 15px rgba(0,104,255,0.4);
+    }}
+    .stDownloadButton button:hover {{
+        transform: translateY(-3px);
+        box-shadow: 0 6px 25px rgba(251,139,30,0.6);
+        background: linear-gradient(135deg, {COLORS['accent_orange']} 0%, {COLORS['blue_bright']} 100%);
+    }}
+
+    /* === GRAPHIQUES === */
+    .stpyplot {{
+        margin-bottom: 2.5rem;
+        padding: 1rem;
+        background: {COLORS['bg_panel']};
+        border: 2px solid {COLORS['border']};
+        border-radius: 8px;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+    }}
+
+    /* === FOOTER === */
+    .footer-terminal {{
+        border-top: 2px solid {COLORS['border']};
+        padding-top: 2rem;
+        margin-top: 4rem;
+        text-align: center;
+        font-family: 'Roboto Mono', monospace;
+        font-size: 0.75rem;
+        color: {COLORS['text_secondary']};
+        letter-spacing: 0.1em;
+    }}
+    .footer-terminal strong {{
+        color: {COLORS['accent_orange']};
+        font-weight: 700;
+    }}
+
+    /* === ANIMATIONS === */
+    @keyframes fadeIn {{
+        from {{ opacity: 0; transform: translateY(20px); }}
+        to {{ opacity: 1; transform: translateY(0); }}
+    }}
+    .animate-in {{
+        animation: fadeIn 0.5s ease-out;
+    }}
+
+    /* === SCROLLBAR === */
+    ::-webkit-scrollbar {{
+        width: 12px;
+        height: 12px;
+    }}
+    ::-webkit-scrollbar-track {{
+        background: {COLORS['bg_dark']};
+        border: 1px solid {COLORS['border']};
+    }}
+    ::-webkit-scrollbar-thumb {{
+        background: linear-gradient(180deg, {COLORS['accent_orange']} 0%, {COLORS['blue_bright']} 100%);
+        border-radius: 6px;
+        border: 2px solid {COLORS['bg_dark']};
+    }}
+    ::-webkit-scrollbar-thumb:hover {{
+        background: linear-gradient(180deg, {COLORS['blue_bright']} 0%, {COLORS['accent_orange']} 100%);
+    }}
+
+    /* === RESPONSIVE === */
+    @media (max-width: 768px) {{
+        .bloomberg-header h1 {{ font-size: 1.8rem; }}
+        button[data-baseweb="tab"] {{ padding: 1rem 1.5rem; font-size: 0.75rem; }}
+        [data-testid="stMetric"] {{ padding: 1rem; }}
+    }}
 </style>
 """
 st.markdown(custom_css, unsafe_allow_html=True)
@@ -188,16 +628,16 @@ def calculate_benchmark_returns(returns_period, tickers, cash_daily_rate):
 
 # --- Barre de progression HTML personnalisée ---
 def create_progress_bar(label, value, color):
-    """Crée une barre de progression HTML."""
+    """Crée une barre de progression HTML premium."""
     value = max(0.0, min(1.0, value))
     return f"""
-    <div style='margin-bottom: 0.8rem;'>
-        <div style='display: flex; justify-content: space-between; margin-bottom: 0.3rem;'>
-            <span style='color: {COLORS['text_secondary']}; font-size: 0.7rem; font-weight: 700; letter-spacing: 0.1em;'>{label}</span>
-            <span style='color: {color}; font-size: 0.8rem; font-weight: 700;'>{value:.1%}</span>
+    <div class='progress-container'>
+        <div class='progress-label'>
+            <span class='progress-label-text'>{label}</span>
+            <span class='progress-value' style='color: {color};'>{value:.1%}</span>
         </div>
-        <div style='background: #0D0D0D; height: 8px; border: 1px solid {COLORS['border']};'>
-            <div style='background: {color}; height: 100%; width: {value*100}%; transition: width 0.3s ease;'></div>
+        <div class='progress-bar-bg'>
+            <div class='progress-bar-fill' style='width: {value*100}%; background: {color};'></div>
         </div>
     </div>
     """
@@ -249,23 +689,29 @@ def process_prices(prices_df_raw):
     returns = prices_clean.pct_change().iloc[1:]
     return prices_clean, returns
 
+# --- MODIFIED: Ajout Optimisation ---
 @st.cache_data
 def calculate_full_period_indicators(benchmark_df, prices_hist, returns_full):
-    """Calcule les indicateurs sur toute la période."""
-    # ... (fonction inchangée) ...
-    if benchmark_df is None or prices_hist is None or returns_full is None: return None, None, None, None
-    if returns_full.empty: st.error("No return data."); return None, None, None, None
+    """Calcule les indicateurs sur toute la période et effectue l'optimisation."""
+    optimal_weights = None # Initialiser
+    if benchmark_df is None or prices_hist is None or returns_full is None: return None, None, None, None, None, None, None
+    if returns_full.empty: st.error("No return data."); return None, None, None, None, None, None, None
 
     cash_daily_365, rf_daily_365, _ = calculate_daily_rates()
     tickers = get_tickers_by_class(benchmark_df, prices_hist.columns)
     all_tickers = tickers['action'] + tickers['bond'] + tickers['commodity']
-    if not all_tickers: st.error("No valid asset tickers found."); return None, None, None, None
-    benchmark_df_indexed = benchmark_df.set_index(benchmark_df['BBG Ticker'].astype(str))
-    asset_class_map = benchmark_df_indexed['Asset Class']
+    if not all_tickers: st.error("No valid asset tickers found."); return None, None, None, None, None, None, None
+
+    try:
+        benchmark_df_indexed = benchmark_df.set_index(benchmark_df['BBG Ticker'].astype(str))
+        asset_class_map = benchmark_df_indexed['Asset Class']
+    except Exception as e:
+        st.error(f"Error creating asset class map: {e}")
+        return None, None, None, None, None, None, None
 
     bench_returns = calculate_benchmark_returns(returns_full, tickers, cash_daily_365).fillna(0)
     bench_returns.name = "Benchmark_Returns"
-    if bench_returns.empty: st.error("Benchmark returns calculation failed."); return None, None, None, None
+    if bench_returns.empty: st.error("Benchmark returns calculation failed."); return None, None, None, None, None, None, None
 
     bench_ind_calc = calculate_indicators(bench_returns, rf_daily_365)
     bench_indicators_full = {
@@ -274,6 +720,97 @@ def calculate_full_period_indicators(benchmark_df, prices_hist, returns_full):
         'VaR 99% (1 jour)': bench_ind_calc['VaR 99%']
     }
 
+    # --- Préparation des données pour optimisation ---
+    returns_universe_opt = returns_full[[col for col in all_tickers if col in returns_full.columns]].copy()
+    if not returns_universe_opt.empty:
+        if CASH_TICKER_NAME not in returns_universe_opt.columns:
+            returns_universe_opt[CASH_TICKER_NAME] = cash_daily_365
+        else:
+             returns_universe_opt[CASH_TICKER_NAME] = cash_daily_365
+
+        mean_daily_returns_opt = returns_universe_opt.mean()
+        cov_matrix_opt = returns_universe_opt.cov()
+    else:
+        st.warning("No asset returns found for optimization data.")
+        mean_daily_returns_opt = None
+        cov_matrix_opt = None
+    # --- FIN Préparation ---
+
+    # --- NOUVEAU: Exécution de l'optimisation ---
+    if SCIPY_AVAILABLE and mean_daily_returns_opt is not None and cov_matrix_opt is not None:
+        try:
+            # Fonction objectif: -Sharpe Ratio
+            def negative_sharpe_ratio(weights, mu, S, rf):
+                portfolio_return = np.sum(mu * weights)
+                portfolio_volatility = np.sqrt(np.dot(weights.T, np.dot(S, weights)))
+                if portfolio_volatility == 0:
+                    return 0 # Éviter division par zéro
+                sharpe = (portfolio_return - rf) / portfolio_volatility
+                return -sharpe # On minimise le négatif du Sharpe
+
+            num_assets = len(mean_daily_returns_opt)
+            # Contraintes
+            constraints = ({'type': 'eq', 'fun': lambda w: np.sum(w) - 1}) # Sum(w) = 1
+            # Bornes: 0 <= w <= 0.10 pour TOUS les actifs (y compris cash)
+            bounds = tuple((0.0, ASSET_WEIGHT_LIMIT) for _ in range(num_assets))
+            
+            # Vérification de faisabilité des contraintes
+            max_possible = ASSET_WEIGHT_LIMIT * num_assets
+            if max_possible + 1e-12 < 1.0:
+                st.session_state['optim_success'] = False
+                st.session_state['optim_error'] = f"Constraints infeasible: {num_assets} assets × {ASSET_WEIGHT_LIMIT:.0%} = {max_possible:.1%} < 100%. Please adjust ASSET_WEIGHT_LIMIT or reduce universe size."
+                optimal_weights = None
+            else:
+                # Construction d'un initial guess valide et faisable
+                init_guess = np.zeros(num_assets)
+                remaining = 1.0
+                for i in range(num_assets):
+                    alloc = min(ASSET_WEIGHT_LIMIT, remaining)
+                    init_guess[i] = alloc
+                    remaining -= alloc
+                    if remaining <= 1e-12:
+                        break
+                # Distribution proportionnelle du reliquat si nécessaire
+                if remaining > 1e-12:
+                    free_idx = [i for i, v in enumerate(init_guess) if v < ASSET_WEIGHT_LIMIT - 1e-12]
+                    if free_idx:
+                        add_each = remaining / len(free_idx)
+                        for i in free_idx:
+                            init_guess[i] += min(add_each, ASSET_WEIGHT_LIMIT - init_guess[i])
+                init_guess = init_guess / init_guess.sum()  # Normalisation numérique finale
+
+            opt_result = sco.minimize(
+                negative_sharpe_ratio,
+                init_guess,
+                args=(mean_daily_returns_opt, cov_matrix_opt, rf_daily_365),
+                method='SLSQP',
+                bounds=bounds,
+                constraints=constraints,
+                options={'disp': False, 'ftol': 1e-9, 'maxiter': 500}
+            )
+
+            if opt_result.success:
+                # Récupérer les poids et les nettoyer (mettre les très petites valeurs à 0)
+                optimal_weights_array = opt_result.x
+                optimal_weights_array[optimal_weights_array < 1e-6] = 0 # Seuil
+                optimal_weights_array /= np.sum(optimal_weights_array) # Renormaliser
+                optimal_weights = pd.DataFrame(optimal_weights_array, index=mean_daily_returns_opt.index, columns=['Weight'])
+                optimal_weights = optimal_weights[optimal_weights['Weight'] > 1e-6] # Filtrer les poids nuls
+                st.session_state['optim_success'] = True # Marqueur de succès
+            else:
+                st.session_state['optim_success'] = False
+                st.session_state['optim_error'] = opt_result.message
+                optimal_weights = None
+
+        except Exception as e:
+            st.session_state['optim_success'] = False
+            st.session_state['optim_error'] = str(e)
+            optimal_weights = None
+    else:
+         optimal_weights = None # Scipy non dispo ou données manquantes
+    # --- FIN NOUVEAU ---
+
+    # ... (Calcul des indicateurs 'indicators_df' inchangé) ...
     returns_aligned = returns_full[[str(t) for t in all_tickers]].loc[bench_returns.index]
     indicators_list = []
     for ticker_str in returns_aligned.columns:
@@ -296,12 +833,14 @@ def calculate_full_period_indicators(benchmark_df, prices_hist, returns_full):
         indicators_list.append({'Ticker': ticker, 'Asset Class': asset_class, 'Volatilite Annuelle': vol, 'Beta (vs Benchmark)': beta, 'Correlation (vs Benchmark)': corr, 'VaR 99% (1 jour)': var, 'Sharpe Ratio Annuel': sharpe})
 
     indicators_df = pd.DataFrame(indicators_list); corr_matrix = returns_aligned.corr()
-    return indicators_df, corr_matrix, bench_indicators_full, asset_class_map
+    
+    # Retourne aussi les données pour l'optimisation ET les poids optimaux
+    return indicators_df, corr_matrix, bench_indicators_full, asset_class_map, mean_daily_returns_opt, cov_matrix_opt, optimal_weights
+
 
 #@st.cache_data # Cache peut être problématique ici
 def calculate_active_weights(portfolio_weights_df, benchmark_df, prices_hist):
     """Calcule les poids courants du portefeuille et les poids actifs par rapport au benchmark."""
-    # ... (fonction inchangée depuis v2.8) ...
     if portfolio_weights_df is None or benchmark_df is None or prices_hist is None or prices_hist.empty:
         return None
 
@@ -330,7 +869,7 @@ def calculate_active_weights(portfolio_weights_df, benchmark_df, prices_hist):
                  class_key = 'action' if class_name == 'Action' else \
                              'bond' if class_name == 'Gov bond' else \
                              'commodity' if class_name == 'Commodities' else None
-                 if class_key and tickers_by_class[class_key]:
+                 if class_key and tickers_by_class.get(class_key):
                      num_assets = len(tickers_by_class[class_key])
                      weight_per_asset = weight_total / num_assets if num_assets > 0 else 0
                      for ticker in tickers_by_class[class_key]:
@@ -349,7 +888,7 @@ def calculate_active_weights(portfolio_weights_df, benchmark_df, prices_hist):
 
         for _, row in weights_with_class.iterrows():
             ticker = str(row['BBG Ticker'])
-            initial_weight = row['Weight'] # Poids initial du PORTEFEUILLE
+            initial_weight = row['Weight']
             asset_class = row['Asset Class'] if pd.notna(row['Asset Class']) else ('Cash' if CASH_TICKER_NAME.lower() == ticker.lower() else 'Unknown')
 
             initial_alloc_eur = initial_weight * INITIAL_NAV_EUR
@@ -357,7 +896,7 @@ def calculate_active_weights(portfolio_weights_df, benchmark_df, prices_hist):
             if ticker.lower() == CASH_TICKER_NAME.lower():
                 init_qty = initial_alloc_eur
                 current_value = initial_alloc_eur
-            elif ticker in start_prices.index and ticker in latest_prices.index and pd.notna(start_prices[ticker]) and start_prices[ticker] != 0:
+            elif ticker in start_prices.index.astype(str) and ticker in latest_prices.index.astype(str) and pd.notna(start_prices[ticker]) and start_prices[ticker] != 0:
                 start_price = start_prices[ticker]
                 latest_price = latest_prices[ticker]
                 if asset_class == 'Commodities' and pd.notna(start_fx) and start_fx != 0 and pd.notna(latest_fx):
@@ -388,24 +927,27 @@ def calculate_active_weights(portfolio_weights_df, benchmark_df, prices_hist):
 
         # 3. Fusionner avec les poids benchmark et calculer poids actif
         active_weight_df = active_weight_df.set_index('BBG Ticker')
+        benchmark_weights_series.index = benchmark_weights_series.index.astype(str)
         combined_df = pd.concat([benchmark_weights_series, active_weight_df[['Asset Class', 'Current Weight']]], axis=1)
+
         combined_df['Benchmark Weight'] = combined_df['Benchmark Weight'].fillna(0)
         combined_df['Current Weight'] = combined_df['Current Weight'].fillna(0)
-        # Remplir Asset Class pour ceux qui sont dans benchmark mais pas dans portefeuille
         if not isinstance(benchmark_df.index, pd.Index) or benchmark_df.index.name != 'BBG Ticker':
-             benchmark_df_indexed_active = benchmark_df.set_index('BBG Ticker')
+             benchmark_df_indexed_active = benchmark_df.set_index(benchmark_df['BBG Ticker'].astype(str))
         else:
-             benchmark_df_indexed_active = benchmark_df
+             benchmark_df_indexed_active = benchmark_df.copy()
+             benchmark_df_indexed_active.index = benchmark_df_indexed_active.index.astype(str)
+
         combined_df['Asset Class'] = combined_df['Asset Class'].fillna(benchmark_df_indexed_active['Asset Class'])
-        combined_df['Asset Class'] = combined_df['Asset Class'].fillna('Unknown') # Fallback
+        combined_df['Asset Class'] = combined_df['Asset Class'].fillna('Unknown')
 
         combined_df['Active Weight'] = combined_df['Current Weight'] - combined_df['Benchmark Weight']
 
-        active_weight_final = combined_df[[
-            'Asset Class', 'Benchmark Weight', 'Current Weight', 'Active Weight'
-        ]].reset_index().rename(columns={'index': 'BBG Ticker'}).copy()
+        # CORRECTION: Utiliser une LISTE au lieu d'un SET
+        active_weight_final = combined_df[
+            ['Asset Class', 'Benchmark Weight', 'Current Weight', 'Active Weight']
+        ].reset_index().rename(columns={'index': 'BBG Ticker'}).copy()
         active_weight_final.loc[active_weight_final['BBG Ticker'].str.lower() == CASH_TICKER_NAME.lower(), 'Asset Class'] = 'Cash'
-
 
         return active_weight_final
 
@@ -483,8 +1025,15 @@ def calculate_simulation_performance(portfolio_df, benchmark_df, returns_all, st
         if ticker_str == cash_ticker_found:
              relevant_dates = returns_all[returns_all.index >= start_date].index
              num_days = len(relevant_dates)
-             final_value = initial_value * ((1 + cash_daily_365) ** num_days)
+             cash_nav = pd.Series(index=relevant_dates, dtype=float)
+             if not relevant_dates.empty:
+                 cash_nav.iloc[0] = initial_value
+                 for d in range(1, num_days):
+                     cash_nav.iloc[d] = cash_nav.iloc[d-1] * (1 + cash_daily_365)
+                 final_value = cash_nav.iloc[-1]
+             else: final_value = initial_value
              pnl = final_value - initial_value
+
         elif ticker_str in sim_period_returns_contrib.columns:
              cum_ret_asset = (1 + sim_period_returns_contrib[ticker_str]).prod() - 1
              final_value = initial_value * (1 + cum_ret_asset)
@@ -498,7 +1047,6 @@ def calculate_simulation_performance(portfolio_df, benchmark_df, returns_all, st
         contribution_by_class = contribution_df.groupby('Asset Class')['P&L Contribution (Base 100)'].sum().reset_index()
     else:
         contribution_by_class = pd.DataFrame(columns=['Asset Class', 'P&L Contribution (Base 100)'])
-
 
     # --- Indicateurs & TE ---
     portfolio_returns_net = nav_portfolio.pct_change().fillna(0)
@@ -528,25 +1076,91 @@ def calculate_simulation_performance(portfolio_df, benchmark_df, returns_all, st
 
     return comparison, sim_indicators, te_series, avg_te, contribution_by_class
 
+# --- Fonction Simulation Performance Spécifique ---
+def simulate_portfolio_performance(portfolio_weights_dict, returns_all, start_date):
+    """Calcule la performance simulée NETTE pour une allocation donnée."""
+    # ... (fonction inchangée depuis v2.9) ...
+    if not portfolio_weights_dict or returns_all is None: return None, None
+    returns_sim = returns_all[returns_all.index >= start_date].copy()
+    if returns_sim.empty: return None, None
+
+    cash_daily_365, rf_daily_365, mgmt_fee_daily_365 = calculate_daily_rates()
+
+    portfolio_returns_gross_sim = pd.Series(0.0, index=returns_sim.index)
+    cash_weight_sim = 0.0
+
+    for ticker, weight in portfolio_weights_dict.items():
+        ticker_str = str(ticker)
+        if CASH_TICKER_NAME.lower() == ticker_str.lower():
+            cash_weight_sim = weight
+        elif ticker_str in returns_sim.columns:
+             valid_returns = returns_sim[ticker_str].fillna(0)
+             if pd.notna(weight): portfolio_returns_gross_sim += valid_returns * weight
+
+    portfolio_returns_gross_sim += cash_weight_sim * cash_daily_365
+
+    if start_date not in portfolio_returns_gross_sim.index:
+        portfolio_returns_gross_sim.loc[start_date] = 0.0
+        portfolio_returns_gross_sim = portfolio_returns_gross_sim.sort_index()
+
+    nav_portfolio_sim = pd.Series(index=portfolio_returns_gross_sim.index, dtype=float)
+    nav_portfolio_sim.loc[start_date] = 100.0
+    start_loc = portfolio_returns_gross_sim.index.get_loc(start_date)
+    for i in range(start_loc + 1, len(portfolio_returns_gross_sim)):
+        current_date = portfolio_returns_gross_sim.index[i]
+        previous_date = portfolio_returns_gross_sim.index[i-1]
+        prev_nav = nav_portfolio_sim.loc[previous_date] if previous_date in nav_portfolio_sim.index else nav_portfolio_sim.iloc[i-1]
+        daily_gross_return = portfolio_returns_gross_sim.loc[current_date]
+        current_nav = prev_nav * (1 + daily_gross_return) * (1 - mgmt_fee_daily_365)
+        nav_portfolio_sim.loc[current_date] = current_nav
+    nav_portfolio_sim.name = "Simulated Portfolio (Net)"
+    nav_portfolio_sim = nav_portfolio_sim.ffill()
+
+    portfolio_returns_net_sim = nav_portfolio_sim.pct_change().fillna(0)
+    port_rets_stats_sim = portfolio_returns_net_sim[portfolio_returns_net_sim.index > start_date]
+
+    sim_indicators_opt = {}
+    if len(port_rets_stats_sim) >= 1:
+        sim_indicators_opt = calculate_indicators(port_rets_stats_sim, rf_daily_365)
+    else:
+        sim_indicators_opt = {'Volatilité': np.nan, 'Sharpe': np.nan, 'VaR 99%': np.nan}
+
+    return nav_portfolio_sim, sim_indicators_opt
+
 
 # --- Interface ---
 
 st.markdown(f"""
-<div class="bloomberg-header">
+<div class="bloomberg-header animate-in">
+    <div class="session-info">
+        <span class="live-indicator"></span>
+        <span style="color: {COLORS['success']}; font-weight: 700;">EN DIRECT</span>
+    </div>
     <h1>⬛ M2 MBFA TERMINAL</h1>
-    <div class="subtitle">PORTFOLIO ANALYTICS & RISK MANAGEMENT SYSTEM | {datetime.now().strftime('%d %b %Y %H:%M:%S')}</div>
+    <div class="subtitle">
+        SYSTÈME D'ANALYSE ET DE GESTION DE PORTEFEUILLE | 
+        SESSION: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')} UTC
+    </div>
 </div>
 """, unsafe_allow_html=True)
 
 # --- Data Loading & Processing ---
-with st.spinner("LOADING MARKET DATA... PLEASE WAIT..."):
+# Initialisation des variables
+benchmark_df, prices_raw, portfolio_df = None, None, None
+prices_hist, returns_all = None, None
+indicators_full, corr_matrix, bench_indicators_full, asset_map = None, None, None, None
+mean_returns_opt, cov_matrix_opt, optimal_weights = None, None, None # Ajout optimal_weights
+active_weight_df = None
+
+with st.spinner("CHARGEMENT DES DONNÉES DU MARCHÉ... VEUILLEZ PATIENTER..."):
     benchmark_df, prices_raw, portfolio_df = load_data()
-    if benchmark_df is None or prices_raw is None or portfolio_df is None: st.error("Critical data loading failed."); st.stop()
+    if benchmark_df is None or prices_raw is None or portfolio_df is None: st.error("Échec du chargement des données critiques."); st.stop()
     prices_hist, returns_all = process_prices(prices_raw)
-    if prices_hist is None or returns_all is None: st.error("Failed to process price data."); st.stop()
-    indicators_full, corr_matrix, bench_indicators_full, asset_map = calculate_full_period_indicators(benchmark_df, prices_hist, returns_all)
-    if indicators_full is None: st.error("Failed to calculate full period indicators."); st.stop()
-    # --- Appel nouvelle fonction ---
+    if prices_hist is None or returns_all is None: st.error("Échec du traitement des données de prix."); st.stop()
+    # --- MODIFIED: Récupération des 7 variables ---
+    indicators_full, corr_matrix, bench_indicators_full, asset_map, mean_returns_opt, cov_matrix_opt, optimal_weights = calculate_full_period_indicators(benchmark_df, prices_hist, returns_all)
+    # --- FIN MODIFICATION ---
+    if indicators_full is None: st.error("Échec du calcul des indicateurs sur la période complète."); st.stop()
     active_weight_df = calculate_active_weights(portfolio_df, benchmark_df, prices_hist)
 
 
@@ -565,28 +1179,29 @@ if returns_all is not None and not returns_all.empty:
             top_gainers = latest_returns.nlargest(3)
             top_losers = latest_returns.nsmallest(3)
 
-            ticker_html = f"<div class='market-ticker'>"
-            ticker_html += f"<span class='ticker-label'>MARKET MOVERS | {latest_date.strftime('%d %b %Y')}</span>"
-            ticker_html += "<div class='ticker-wrap'>"
-            ticker_html += "<span class='ticker-content'>"
-
-            ticker_html += f"<strong style='color: {COLORS['success']};'>TOP GAINERS:</strong> "
+            ticker_html = f"<div class='market-ticker animate-in'>"
+            ticker_html += f"<span class='ticker-label'>📈 MOUVEMENTS DU MARCHÉ | {latest_date.strftime('%d %B %Y')}</span>"
+            ticker_html += "<div class='ticker-wrap'><div class='ticker-content'>"
+            
+            # Création d'une boucle pour répéter le contenu et assurer le scroll continu
+            ticker_segment = ""
+            ticker_segment += f"<strong style='color: {COLORS['success']};'>PLUS FORTES HAUSSES:</strong> "
             gainer_strings = []
             for ticker, val in top_gainers.items():
                  gainer_strings.append(f"<span class='ticker'>{ticker}</span> <span class='price-up'>{val:+.2%}</span>")
-            ticker_html += "&nbsp;|&nbsp;".join(gainer_strings)
-
-            ticker_html += f"&nbsp;&nbsp;&nbsp;&nbsp;<strong style='color: {COLORS['danger']};'>TOP LOSERS:</strong> "
+            ticker_segment += "&nbsp;|&nbsp;".join(gainer_strings)
+            
+            ticker_segment += f"&nbsp;&nbsp;&nbsp;&nbsp;<strong style='color: {COLORS['danger']};'>PLUS FORTES BAISSES:</strong> "
             loser_strings = []
             for ticker, val in top_losers.items():
                  loser_strings.append(f"<span class='ticker'>{ticker}</span> <span class='price-down'>{val:+.2%}</span>")
-            ticker_html += "&nbsp;|&nbsp;".join(loser_strings)
-
-            ticker_html += "&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"
-            ticker_html += f"<strong style='color: {COLORS['success']};'>TOP GAINERS:</strong> " + "&nbsp;|&nbsp;".join(gainer_strings)
-            ticker_html += f"&nbsp;&nbsp;&nbsp;&nbsp;<strong style='color: {COLORS['danger']};'>TOP LOSERS:</strong> " + "&nbsp;|&nbsp;".join(loser_strings)
-
-            ticker_html += "</span></div></div>"
+            ticker_segment += "&nbsp;|&nbsp;".join(loser_strings)
+            ticker_segment += "&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"
+            
+            # Répéter 3 fois pour assurer le scroll continu
+            ticker_html += ticker_segment * 3
+            
+            ticker_html += "</div></div></div>"
             st.markdown(ticker_html, unsafe_allow_html=True)
 
     except Exception as e:
@@ -596,6 +1211,7 @@ if returns_all is not None and not returns_all.empty:
 # --- Calcul des poids du portefeuille pour la barre latérale --- (Inchangé)
 portfolio_class_weights = {}
 if portfolio_df is not None and benchmark_df is not None:
+    # ... (code inchangé) ...
     portfolio_df['BBG Ticker'] = portfolio_df['BBG Ticker'].astype(str)
     benchmark_df['BBG Ticker'] = benchmark_df['BBG Ticker'].astype(str)
     display_weights_sidebar = portfolio_df.merge(benchmark_df[['BBG Ticker', 'Asset Class']], on='BBG Ticker', how='left')
@@ -608,125 +1224,128 @@ if portfolio_df is not None and benchmark_df is not None:
     if explicit_cash_weight_sidebar > 0.0001:
         portfolio_class_weights['Cash'] = explicit_cash_weight_sidebar
 
-# --- Barre Latérale (Sidebar) --- (Inchangé)
-st.sidebar.markdown("### SYSTEM PARAMETERS")
 
-with st.sidebar.expander("PORTFOLIO COMPOSITION", expanded=True):
-    st.markdown("**YOUR ALLOCATION**")
-    bars = create_progress_bar("EQUITY", portfolio_class_weights.get('Action', 0.0), COLORS['danger'])
-    bars += create_progress_bar("BONDS", portfolio_class_weights.get('Gov bond', 0.0), COLORS['blue_bright'])
-    bars += create_progress_bar("CMDTY", portfolio_class_weights.get('Commodities', 0.0), COLORS['accent_orange'])
-    bars += create_progress_bar("CASH", portfolio_class_weights.get('Cash', 0.0), COLORS['success'])
+# --- Barre Latérale (Sidebar) --- (Inchangé)
+st.sidebar.markdown("### ⚙️ PARAMÈTRES SYSTÈME")
+with st.sidebar.expander("💼 COMPOSITION DU PORTEFEUILLE", expanded=True):
+    st.markdown("**VOTRE ALLOCATION ACTUELLE**")
+    bars = create_progress_bar("ACTIONS", portfolio_class_weights.get('Action', 0.0), COLORS['danger'])
+    bars += create_progress_bar("OBLIGATIONS", portfolio_class_weights.get('Gov bond', 0.0), COLORS['blue_bright'])
+    bars += create_progress_bar("MATIÈRES PREMIÈRES", portfolio_class_weights.get('Commodities', 0.0), COLORS['accent_orange'])
+    bars += create_progress_bar("LIQUIDITÉS", portfolio_class_weights.get('Cash', 0.0), COLORS['success'])
     st.markdown(bars, unsafe_allow_html=True)
 
-with st.sidebar.expander("BENCHMARK COMPOSITION", expanded=True):
-    st.markdown("**60/20/15/5 STRATEGY**")
-    bench_bars = create_progress_bar("EQUITY", BENCHMARK_WEIGHTS['Action'], COLORS['danger'])
-    bench_bars += create_progress_bar("BONDS", BENCHMARK_WEIGHTS['Gov bond'], COLORS['blue_bright'])
-    bench_bars += create_progress_bar("CMDTY", BENCHMARK_WEIGHTS['Commodities'], COLORS['accent_orange'])
-    bench_bars += create_progress_bar("CASH", BENCHMARK_WEIGHTS['Cash'], COLORS['success'])
+with st.sidebar.expander("📊 COMPOSITION DU BENCHMARK", expanded=True):
+    st.markdown("**STRATÉGIE 60/20/15/5**")
+    bench_bars = create_progress_bar("ACTIONS", BENCHMARK_WEIGHTS['Action'], COLORS['danger'])
+    bench_bars += create_progress_bar("OBLIGATIONS", BENCHMARK_WEIGHTS['Gov bond'], COLORS['blue_bright'])
+    bench_bars += create_progress_bar("MATIÈRES PREMIÈRES", BENCHMARK_WEIGHTS['Commodities'], COLORS['accent_orange'])
+    bench_bars += create_progress_bar("LIQUIDITÉS", BENCHMARK_WEIGHTS['Cash'], COLORS['success'])
     st.markdown(bench_bars, unsafe_allow_html=True)
 
-with st.sidebar.expander("RISK-FREE & CASH RATE", expanded=True):
-    st.metric("ANNUAL RATE", f"{RISK_FREE_RATE_ANNUAL:.1%}", help="Used for Sharpe Ratio calculation.");
-    st.caption(f"CASH REMUNERATION: {CASH_RATE_ANNUAL:.1%}, BASIS: {CALENDAR_DAYS} DAYS")
+with st.sidebar.expander("💰 TAUX SANS RISQUE & CASH", expanded=True):
+    st.metric("TAUX ANNUEL", f"{RISK_FREE_RATE_ANNUAL:.2%}", help="Utilisé pour le calcul du ratio de Sharpe")
+    st.caption(f"RÉMUNÉRATION CASH: {CASH_RATE_ANNUAL:.2%} | BASE: {CALENDAR_DAYS} JOURS")
 
-with st.sidebar.expander("FEES", expanded=True):
-     st.metric("MANAGEMENT (ANNUAL)", f"{MANAGEMENT_FEE_ANNUAL:.2%}", help=f"Deducted daily from portfolio NAV based on {CALENDAR_DAYS} days.")
-     st.metric("TRANSACTION (PER TRADE)", f"{TRANSACTION_FEE_RATE:.2%}", help="Applied on buy/sell nominal. Not applied in current simulation.")
+with st.sidebar.expander("💸 FRAIS DE GESTION", expanded=True):
+     st.metric("GESTION (ANNUEL)", f"{MANAGEMENT_FEE_ANNUAL:.2%}", help=f"Déduits quotidiennement sur base {CALENDAR_DAYS} jours")
+     st.metric("TRANSACTION (PAR ORDRE)", f"{TRANSACTION_FEE_RATE:.2%}", help="Appliqués sur le nominal acheté/vendu")
 
-with st.sidebar.expander("DATA SOURCE", expanded=True):
-    st.info("**SOURCE**: Google Sheets\n\n**PORTFOLIO**: Col C (Ticker) & F (Weight)")
-    st.caption(f"LAST UPDATE: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+with st.sidebar.expander("📡 SOURCE DES DONNÉES", expanded=True):
+    st.info("**SOURCE**: Google Sheets\n\n**PORTEFEUILLE**: Col C (Ticker) & F (Poids)")
+    st.caption(f"DERNIÈRE MAJ: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
 
-# --- Main Tabs ---
-tab1, tab2, tab3 = st.tabs(["MONITOR", "HOLDINGS", "ANALYTICS"])
+# --- TABS EN FRANÇAIS ---
+tab1, tab2, tab3 = st.tabs(["📊 SUIVI", "📋 POSITIONS", "📈 ANALYTICS"])
 
-# --- TAB 1: MONITOR ---
+# --- TAB 1: SUIVI (Traduction française) ---
 with tab1:
-    st.markdown(f"## PERFORMANCE ANALYSIS: {START_DATE_SIMULATION.strftime('%d/%b/%Y')} - PRESENT")
+    st.markdown(f"## 📊 ANALYSE DE PERFORMANCE: {START_DATE_SIMULATION.strftime('%d/%m/%Y')} - AUJOURD'HUI")
     comparison, sim_ind, te_series, avg_te, contribution_by_class = calculate_simulation_performance(portfolio_df, benchmark_df, returns_all, START_DATE_SIMULATION)
 
-    # Quick Stats Section (inchangé)
-    st.markdown("### QUICK STATS")
+    st.markdown("### 🎯 INDICATEURS RAPIDES")
     if comparison is not None and not comparison.empty:
-        # ... (code inchangé) ...
         try:
             latest_nav_bench = comparison['Benchmark'].iloc[-1]
             latest_nav_port = comparison['Votre Fonds (Net)'].iloc[-1]
             perf_bench = (latest_nav_bench / 100) - 1
             perf_port = (latest_nav_port / 100) - 1
             outperformance = perf_port - perf_bench
-
             qcol1, qcol2, qcol3, qcol4, qcol5 = st.columns(5)
-            qcol1.metric("PORTFOLIO NAV (NET)", f"{latest_nav_port:.2f}", f"{perf_port:+.2%}")
-            qcol2.metric("BENCHMARK NAV", f"{latest_nav_bench:.2f}", f"{perf_bench:+.2%}")
-            delta_perf_display = f"{outperformance:+.2%}"
-            qcol3.metric("OUTPERFORMANCE", delta_perf_display)
-
+            qcol1.metric("VL PORTEFEUILLE (NET)", f"{latest_nav_port:.2f}", f"{perf_port:+.2%}")
+            qcol2.metric("VL BENCHMARK", f"{latest_nav_bench:.2f}", f"{perf_bench:+.2%}")
+            qcol3.metric("SURPERFORMANCE", f"{outperformance:+.2%}")
             if sim_ind:
-                qcol4.metric("VOL (PORT., ANN.)", f"{sim_ind['portfolio']['Volatilité']:.2%}" if pd.notna(sim_ind['portfolio'].get('Volatilité')) else "N/A", help=f"Annualized on {TRADING_DAYS}d, Net Returns")
-                qcol5.metric("SHARPE (PORT., ANN.)", f"{sim_ind['portfolio']['Sharpe']:.3f}" if pd.notna(sim_ind['portfolio'].get('Sharpe')) else "N/A", help=f"Annualized on {TRADING_DAYS}d, Net Returns vs {RISK_FREE_RATE_ANNUAL:.1%} Rf")
+                qcol4.metric("VOLATILITÉ (ANN.)", f"{sim_ind['portfolio']['Volatilité']:.2%}" if pd.notna(sim_ind['portfolio'].get('Volatilité')) else "N/A", help=f"Annualisée sur {TRADING_DAYS}j")
+                qcol5.metric("SHARPE (ANN.)", f"{sim_ind['portfolio']['Sharpe']:.3f}" if pd.notna(sim_ind['portfolio'].get('Sharpe')) else "N/A", help=f"Annualisé vs {RISK_FREE_RATE_ANNUAL:.1%} Rf")
         except Exception as e:
-            st.warning(f"Could not display Quick Stats: {e}")
-            pass
+            st.warning(f"Impossible d'afficher les indicateurs: {e}")
     else:
-        st.warning("Quick Stats unavailable (no simulation data).")
+        st.warning("Indicateurs rapides indisponibles.")
     st.markdown("---")
 
-    # Section Contribution à la Performance (inchangé)
-    st.markdown("### PERFORMANCE CONTRIBUTION (GROSS, BASE 100)")
+    st.markdown("### 💹 CONTRIBUTION À LA PERFORMANCE (BRUT, BASE 100)")
     if contribution_by_class is not None and not contribution_by_class.empty:
          if 'Asset Class' in contribution_by_class.columns and 'P&L Contribution (Base 100)' in contribution_by_class.columns:
               contrib_chart_data = contribution_by_class.set_index('Asset Class')
               st.bar_chart(contrib_chart_data['P&L Contribution (Base 100)'])
-
               st.dataframe(contribution_by_class.style.format({'P&L Contribution (Base 100)': '{:+.2f}'}), use_container_width=True)
-              st.caption("Contribution based on initial weights and cumulative gross asset returns (fees excluded).")
+              st.caption("**Note**: Contribution basée sur les poids initiaux et les rendements bruts cumulés (hors frais).")
          else:
-              st.warning("Contribution data is missing required columns ('Asset Class', 'P&L Contribution (Base 100)').")
+              st.warning("Données de contribution incomplètes.")
     else:
-         st.warning("Performance contribution data unavailable.")
+         st.warning("Données de contribution indisponibles.")
     st.markdown("---")
 
     if sim_ind:
-        st.markdown("### KEY PERFORMANCE INDICATORS (SIMULATION PERIOD)")
-        # ... (KPIs section inchangée) ...
+        st.markdown("### 📊 INDICATEURS CLÉS DE PERFORMANCE (PÉRIODE DE SIMULATION)")
         col1, col2 = st.columns(2)
         with col1:
-            st.markdown("#### BENCHMARK (GROSS)")
+            st.markdown("#### BENCHMARK (BRUT)")
             subcol1, subcol2, subcol3 = st.columns(3)
-            subcol1.metric("VOL (ANN.)", f"{sim_ind['benchmark']['Volatilité']:.2%}" if pd.notna(sim_ind['benchmark']['Volatilité']) else "N/A", help=f"Annualized on {TRADING_DAYS} days")
-            subcol2.metric("SHARPE (ANN.)", f"{sim_ind['benchmark']['Sharpe']:.3f}" if pd.notna(sim_ind['benchmark']['Sharpe']) else "N/A", help=f"Annualized on {TRADING_DAYS} days vs {RISK_FREE_RATE_ANNUAL:.1%} Rf")
-            subcol3.metric("VAR 99% (1D)", f"{sim_ind['benchmark']['VaR 99%']:.2%}" if pd.notna(sim_ind['benchmark']['VaR 99%']) else "N/A")
+            subcol1.metric("VOLATILITÉ", f"{sim_ind['benchmark']['Volatilité']:.2%}" if pd.notna(sim_ind['benchmark']['Volatilité']) else "N/A")
+            subcol2.metric("SHARPE", f"{sim_ind['benchmark']['Sharpe']:.3f}" if pd.notna(sim_ind['benchmark']['Sharpe']) else "N/A")
+            subcol3.metric("VAR 99%", f"{sim_ind['benchmark']['VaR 99%']:.2%}" if pd.notna(sim_ind['benchmark']['VaR 99%']) else "N/A")
         with col2:
-            st.markdown("#### PORTFOLIO (NET OF MGMT FEES)")
+            st.markdown("#### PORTEFEUILLE (NET)")
             subcol1, subcol2, subcol3 = st.columns(3)
-            subcol1.metric("VOL (ANN.)", f"{sim_ind['portfolio']['Volatilité']:.2%}" if pd.notna(sim_ind['portfolio']['Volatilité']) else "N/A", help=f"Annualized on {TRADING_DAYS} days")
-            subcol2.metric("SHARPE (ANN.)", f"{sim_ind['portfolio']['Sharpe']:.3f}" if pd.notna(sim_ind['portfolio']['Sharpe']) else "N/A", help=f"Annualized on {TRADING_DAYS} days vs {RISK_FREE_RATE_ANNUAL:.1%} Rf")
-            subcol3.metric("VAR 99% (1D)", f"{sim_ind['portfolio']['VaR 99%']:.2%}" if pd.notna(sim_ind['portfolio']['VaR 99%']) else "N/A")
+            subcol1.metric("VOLATILITÉ", f"{sim_ind['portfolio']['Volatilité']:.2%}" if pd.notna(sim_ind['portfolio']['Volatilité']) else "N/A")
+            subcol2.metric("SHARPE", f"{sim_ind['portfolio']['Sharpe']:.3f}" if pd.notna(sim_ind['portfolio']['Sharpe']) else "N/A")
+            subcol3.metric("VAR 99%", f"{sim_ind['portfolio']['VaR 99%']:.2%}" if pd.notna(sim_ind['portfolio']['VaR 99%']) else "N/A")
     st.markdown("---")
 
-    st.markdown("### BENCHMARK REFERENCE (FULL PERIOD, GROSS)")
+    st.markdown("### 📌 RÉFÉRENCE BENCHMARK (PÉRIODE COMPLÈTE, BRUT)")
     if bench_indicators_full:
         col1, col2, col3 = st.columns(3)
-        col1.metric("VOLATILITY", f"{bench_indicators_full['Volatilité Annuelle']:.2%}" if pd.notna(bench_indicators_full['Volatilité Annuelle']) else "N/A")
-        col2.metric("SHARPE RATIO", f"{bench_indicators_full['Ratio de Sharpe Annuel']:.3f}" if pd.notna(bench_indicators_full['Ratio de Sharpe Annuel']) else "N/A")
-        col3.metric("VAR 99% (1D)", f"{bench_indicators_full['VaR 99% (1 jour)']:.2%}" if pd.notna(bench_indicators_full['VaR 99% (1 jour)']) else "N/A")
+        col1.metric("VOLATILITÉ", f"{bench_indicators_full['Volatilité Annuelle']:.2%}" if pd.notna(bench_indicators_full['Volatilité Annuelle']) else "N/A")
+        col2.metric("SHARPE", f"{bench_indicators_full['Ratio de Sharpe Annuel']:.3f}" if pd.notna(bench_indicators_full['Ratio de Sharpe Annuel']) else "N/A")
+        col3.metric("VAR 99%", f"{bench_indicators_full['VaR 99% (1 jour)']:.2%}" if pd.notna(bench_indicators_full['VaR 99% (1 jour)']) else "N/A")
     st.markdown("---")
 
-    st.markdown("### PERFORMANCE CHART & TRACKING ERROR")
+    st.markdown("### 📈 GRAPHIQUE DE PERFORMANCE & TRACKING ERROR")
     if comparison is not None:
-        fig, ax1 = plt.subplots(figsize=(14, 7)); fig.patch.set_facecolor(COLORS['bg_dark']); ax1.set_facecolor(COLORS['bg_panel'])
-        ax1.plot(comparison.index, comparison['Benchmark'], color=COLORS['blue_bright'], linewidth=2.5, linestyle='--', label='BENCHMARK (GROSS)', alpha=0.9)
-        ax1.plot(comparison.index, comparison['Votre Fonds (Net)'], color=COLORS['accent_orange'], linewidth=2.5, label='PORTFOLIO (NET)', alpha=0.9)
-        ax1.set_ylabel("NAV (BASE 100)", fontsize=11, fontweight='600', color=COLORS['text_primary'], fontfamily='monospace'); ax1.set_xlabel("DATE", fontsize=10, fontweight='500', color=COLORS['text_secondary']); ax1.tick_params(axis='y', labelcolor=COLORS['text_primary'], colors=COLORS['text_primary']); ax1.tick_params(axis='x', labelcolor=COLORS['text_secondary'], colors=COLORS['text_secondary'])
+        fig, ax1 = plt.subplots(figsize=(14, 7))
+        fig.patch.set_facecolor(COLORS['bg_dark'])
+        ax1.set_facecolor(COLORS['bg_panel'])
+        ax1.plot(comparison.index, comparison['Benchmark'], color=COLORS['blue_bright'], linewidth=2.5, linestyle='--', label='BENCHMARK (BRUT)', alpha=0.9)
+        ax1.plot(comparison.index, comparison['Votre Fonds (Net)'], color=COLORS['accent_orange'], linewidth=2.5, label='PORTEFEUILLE (NET)', alpha=0.9)
+        ax1.set_ylabel("VL (BASE 100)", fontsize=11, fontweight='600', color=COLORS['text_primary'], fontfamily='monospace')
+        ax1.set_xlabel("DATE", fontsize=10, fontweight='500', color=COLORS['text_secondary'])
+        ax1.tick_params(axis='y', labelcolor=COLORS['text_primary'], colors=COLORS['text_primary'])
+        ax1.tick_params(axis='x', labelcolor=COLORS['text_secondary'], colors=COLORS['text_secondary'])
         min_val = comparison.min().min() if not comparison.empty else 90
         max_val = comparison.max().max() if not comparison.empty else 110
         ax1.set_ylim(bottom=max(80, min_val - 2), top=min(120, max_val + 2))
 
-        ax1.grid(True, alpha=0.2, linestyle='--', linewidth=0.5, color=COLORS['grid']); ax1.spines['bottom'].set_color(COLORS['border']); ax1.spines['top'].set_color(COLORS['border']); ax1.spines['left'].set_color(COLORS['border']); ax1.spines['right'].set_color(COLORS['border'])
-        ax2 = ax1.twinx(); ax2.set_ylabel('TRACKING ERROR (ANN %)', fontsize=11, fontweight='600', color=COLORS['accent_yellow'], fontfamily='monospace'); ax2.tick_params(axis='y', labelcolor=COLORS['accent_yellow'], colors=COLORS['accent_yellow']); ax2.yaxis.set_major_formatter(mtick.PercentFormatter(xmax=1.0))
+        ax1.grid(True, alpha=0.2, linestyle='--', linewidth=0.5, color=COLORS['grid'])
+        ax1.spines['bottom'].set_color(COLORS['border'])
+        ax1.spines['top'].set_color(COLORS['border'])
+        ax1.spines['left'].set_color(COLORS['border'])
+        ax1.spines['right'].set_color(COLORS['border'])
+        ax2 = ax1.twinx()
+        ax2.set_ylabel('TRACKING ERROR (ANN %)', fontsize=11, fontweight='600', color=COLORS['accent_yellow'], fontfamily='monospace')
+        ax2.tick_params(axis='y', labelcolor=COLORS['accent_yellow'], colors=COLORS['accent_yellow'])
+        ax2.yaxis.set_major_formatter(mtick.PercentFormatter(xmax=1.0))
         lines = []; labels = []; lines1, labels1 = ax1.get_legend_handles_labels(); lines.extend(lines1); labels.extend(labels1)
         if te_series is not None and not te_series.empty:
             te_plot = te_series
@@ -737,17 +1356,22 @@ with tab1:
             lines.append(line_te); labels.append(f'AVG TE ({avg_te:.2%})'); ax2.set_ylim(0, max(0.05, np.ceil(avg_te*100)/100 + 0.01))
         else: ax2.set_yticks([])
         ax1.legend(lines, labels, loc='upper left', frameon=True, facecolor=COLORS['bg_panel'], edgecolor=COLORS['border'], fontsize=9, labelcolor=COLORS['text_primary'])
-        plt.title("PERFORMANCE MONITOR (PORTFOLIO NET vs BENCHMARK GROSS)", fontsize=13, fontweight='700', pad=15, color=COLORS['accent_orange'], fontfamily='monospace'); plt.xticks(rotation=45, fontsize=8); fig.tight_layout(); st.pyplot(fig)
+        plt.title("SUIVI DE PERFORMANCE (PORTEFEUILLE NET vs BENCHMARK BRUT)", fontsize=13, fontweight='700', pad=15, color=COLORS['accent_orange'], fontfamily='monospace')
+        plt.xticks(rotation=45, fontsize=8)
+        fig.tight_layout()
+        st.pyplot(fig)
         if not np.isnan(avg_te):
-            col1, col2, col3 = st.columns([1, 1, 1]);
-            with col2: st.metric("AVG TRACKING ERROR", f"{avg_te:.2%}", help=f"Rolling 60d (or overall) annualized ({TRADING_DAYS}d) TE of Net Portfolio vs Gross Benchmark")
-    else: st.warning("SIMULATION DATA UNAVAILABLE")
+            col1, col2, col3 = st.columns([1, 1, 1])
+            with col2:
+                st.metric("TRACKING ERROR MOYEN", f"{avg_te:.2%}", help=f"Tracking Error annualisé ({TRADING_DAYS}j) sur fenêtre glissante 60j")
+    else:
+        st.warning("DONNÉES DE SIMULATION INDISPONIBLES")
 
-# --- TAB 2: HOLDINGS ---
+# --- TAB 2: POSITIONS --- (Inchangé)
 with tab2:
-    st.markdown("## PORTFOLIO HOLDINGS")
+    st.markdown("## 📋 POSITIONS DU PORTEFEUILLE")
     if portfolio_df is not None and benchmark_df is not None:
-        st.markdown("### PORTFOLIO SUMMARY")
+        st.markdown("### 📊 RÉSUMÉ DU PORTEFEUILLE")
         portfolio_df['BBG Ticker'] = portfolio_df['BBG Ticker'].astype(str)
         benchmark_df['BBG Ticker'] = benchmark_df['BBG Ticker'].astype(str)
         display_weights = portfolio_df.merge(benchmark_df[['BBG Ticker', 'Asset Class']], on='BBG Ticker', how='left'); display_weights = display_weights[['Asset Class', 'BBG Ticker', 'Weight']]
@@ -757,38 +1381,38 @@ with tab2:
         non_cash_weights = display_weights[~display_weights['BBG Ticker'].str.contains(CASH_TICKER_NAME, case=False, na=False)]
 
         col1, col2, col3, col4 = st.columns(4);
-        col1.metric("POSITIONS", len(non_cash_weights) + (1 if explicit_cash_weight > 0 else 0) )
-        col2.metric("ASSET WEIGHT", f"{non_cash_weights['Weight'].sum():.1%}")
-        col3.metric("CASH WEIGHT", f"{explicit_cash_weight:.2%}", help="Explicitly defined in 'Portefeuille' sheet")
+        col1.metric("POSITIONS", len(non_cash_weights) + (1 if explicit_cash_weight > 0 else 0))
+        col2.metric("POIDS ACTIFS", f"{non_cash_weights['Weight'].sum():.1%}")
+        col3.metric("POIDS CASH", f"{explicit_cash_weight:.2%}", help="Défini explicitement dans la feuille 'Portefeuille'")
         avg_weight = non_cash_weights['Weight'].mean() if not non_cash_weights.empty else 0.0
-        col4.metric("AVG ASSET WGHT", f"{avg_weight:.2%}")
+        col4.metric("POIDS MOYEN", f"{avg_weight:.2%}")
 
         st.markdown("---")
         col_left, col_right = st.columns([2, 1])
         with col_left:
-            st.markdown("#### CURRENT POSITION DETAILS")
+            st.markdown("#### DÉTAIL DES POSITIONS ACTUELLES")
             df_display = pd.concat([non_cash_weights, cash_row]).reset_index(drop=True)
             styled_df = df_display.style.format({'Weight': '{:.2%}'}).background_gradient(subset=['Weight'], cmap='YlOrRd', vmin=0, vmax=max(0.01, df_display['Weight'].max()))
             st.dataframe(styled_df, use_container_width=True, height=400)
         with col_right:
-            st.markdown("#### CURRENT ASSET CLASS BREAKDOWN")
+            st.markdown("#### RÉPARTITION PAR CLASSE D'ACTIF")
             if 'Asset Class' in display_weights.columns:
                 class_weights = non_cash_weights.groupby('Asset Class')['Weight'].sum().sort_values(ascending=False);
                 for asset_class, weight in class_weights.items(): st.metric(asset_class.upper(), f"{weight:.2%}")
                 if explicit_cash_weight > 0.0001: st.metric("CASH", f"{explicit_cash_weight:.2%}")
-            else: st.warning("Asset class data unavailable")
+            else: st.warning("Données de classe d'actif indisponibles")
         st.markdown("---")
 
         # --- Section Active Weight ---
-        st.markdown("### ACTIVE WEIGHT ANALYSIS (vs Benchmark)")
+        st.markdown("### ⚖️ ANALYSE DES POIDS ACTIFS (vs Benchmark)")
         if active_weight_df is not None:
             latest_active_date = prices_hist.index[-1].strftime('%d %b %Y') if prices_hist is not None else "N/A"
-            st.caption(f"Comparison of current portfolio weights vs benchmark weights (as of {latest_active_date}).")
+            st.caption(f"**Comparaison** des poids actuels du portefeuille vs benchmark (au {latest_active_date}).")
 
             def color_active_weight_styler(val):
                 """Applies color based on active weight value for Styler."""
                 if pd.isna(val): return ''
-                threshold = 0.0001 # 0.01% threshold
+                threshold = 0.0001
                 color = COLORS['danger'] if val < -threshold else COLORS['success'] if val > threshold else COLORS['text_secondary']
                 return f'color: {color}; font-weight: bold;'
 
@@ -804,21 +1428,17 @@ with tab2:
 
             st.dataframe(styled_active_df, use_container_width=True, height=450)
 
-            st.markdown("#### ACTIVE WEIGHT VISUALIZATION")
+            st.markdown("#### VISUALISATION DES POIDS ACTIFS")
             active_chart_data = active_weight_display[abs(active_weight_display['Active Weight']) > 1e-6].set_index('BBG Ticker')['Active Weight']
             if not active_chart_data.empty:
-                # --- CORRECTION: Remove color argument ---
                 st.bar_chart(active_chart_data)
-                # --- FIN CORRECTION ---
             else:
-                st.info("No significant active weights to display.")
+                st.info("Aucun poids actif significatif à afficher.")
         else:
-            st.warning("Active weight data unavailable.")
+            st.warning("Données de poids actifs indisponibles.")
         st.markdown("---")
-        # --- FIN Section Active Weight ---
 
-
-        st.markdown("### ALLOCATION VISUALIZATION (Current)")
+        st.markdown("### 📊 VISUALISATION DE L'ALLOCATION (Actuelle)")
         if 'Asset Class' in display_weights.columns:
             current_class_weights = non_cash_weights.groupby('Asset Class')['Weight'].sum();
             if explicit_cash_weight > 0.0001: current_class_weights['Cash'] = explicit_cash_weight
@@ -829,27 +1449,28 @@ with tab2:
                 colors_pie = [COLORS['danger'], COLORS['blue_bright'], COLORS['accent_orange'], COLORS['success'], COLORS['accent_yellow']]
                 wedges, texts, autotexts = ax_pie.pie(class_data_pie.values, labels=class_data_pie.index, autopct='%1.1f%%', colors=colors_pie[:len(class_data_pie)], startangle=90, textprops={'fontsize': 10, 'fontweight': '600', 'color': COLORS['text_primary'], 'fontfamily': 'monospace'})
                 for autotext in autotexts: autotext.set_color(COLORS['bg_dark']); autotext.set_fontweight('bold'); autotext.set_fontsize(11)
-                ax_pie.set_title("CURRENT ASSET CLASS ALLOCATION", fontsize=13, fontweight='700', pad=15, color=COLORS['accent_orange'], fontfamily='monospace'); st.pyplot(fig_pie)
-            else: st.warning("No allocation data.")
+                ax_pie.set_title("ALLOCATION PAR CLASSE D'ACTIF", fontsize=13, fontweight='700', pad=15, color=COLORS['accent_orange'], fontfamily='monospace'); st.pyplot(fig_pie)
+            else: st.warning("Aucune donnée d'allocation.")
         st.markdown("---")
-        st.markdown("### MANAGEMENT RULES & CONSTRAINTS")
+        st.markdown("### 📜 RÈGLES DE GESTION & CONTRAINTES")
         st.markdown(f"""
         <div class='bloomberg-panel'>
-            <h4>Mandate Rules Summary</h4>
+            <h4>📋 Résumé du Mandat de Gestion</h4>
             <ul>
-                <li><strong>Management Fees:</strong> {MANAGEMENT_FEE_ANNUAL:.2%} p.a. (deducted daily)</li>
-                <li><strong>Cash Remuneration:</strong> {CASH_RATE_ANNUAL:.2%} p.a. (applied daily)</li>
-                <li><strong>Transaction Fees:</strong> {TRANSACTION_FEE_RATE:.2%} per trade (buy/sell). <span style='color:{COLORS['text_secondary']};'>*Note: Not applied in current NAV simulation.*</span></li>
-                <li><strong>Overdraft Facility:</strong> Up to 20% allowed (subject to costs).</li>
-                <li><strong>Risk Calculation (if Leveraged):</strong> VaR (1d, 99%) mandatory.</li>
-                <li><strong>Trading Basis:</strong> Closing prices.</li>
-                <li><strong>Universe:</strong> Benchmark components only.</li>
-                <li><strong>Objective:</strong> Beat the benchmark.</li>
+                <li><strong>Frais de Gestion:</strong> {MANAGEMENT_FEE_ANNUAL:.2%} p.a. (déduits quotidiennement)</li>
+                <li><strong>Rémunération Cash:</strong> {CASH_RATE_ANNUAL:.2%} p.a. (appliquée quotidiennement)</li>
+                <li><strong>Frais de Transaction:</strong> {TRANSACTION_FEE_RATE:.2%} par ordre. <span style='color:{COLORS['text_secondary']};'>*Note: Non appliqués dans la simulation actuelle.*</span></li>
+                <li><strong>Facilité de Découvert:</strong> Jusqu'à 20% autorisé (sous conditions).</li>
+                <li><strong>Calcul du Risque (si Levier):</strong> VaR (1j, 99%) obligatoire.</li>
+                <li><strong>Base de Trading:</strong> Prix de clôture.</li>
+                <li><strong>Univers d'Investissement:</strong> Composants du benchmark uniquement.</li>
+                <li><strong>Objectif:</strong> Battre le benchmark.</li>
             </ul>
         </div>
         """, unsafe_allow_html=True)
-        st.warning("""**TRANSACTION SIMULATOR**\n\n*UNDER DEVELOPMENT*\n\nAvailable soon for strategy testing.""")
-    else: st.error("PORTFOLIO DATA UNAVAILABLE")
+        st.warning("**🔧 SIMULATEUR DE TRANSACTIONS**\n\n*EN DÉVELOPPEMENT*\n\nDisponible prochainement pour tester vos stratégies.")
+    else:
+        st.error("DONNÉES DU PORTEFEUILLE INDISPONIBLES")
 
 
 # --- TAB 3: ANALYTICS --- (Inchangé)
@@ -911,8 +1532,8 @@ with tab3:
                     ax_sharpe.set_xlabel('ANNUAL VOLATILITY (%)', fontsize=11, fontweight='600', color=COLORS['text_primary'], fontfamily='monospace'); ax_sharpe.set_ylabel('SHARPE RATIO (ANN.)', fontsize=11, fontweight='600', color=COLORS['text_primary'], fontfamily='monospace'); ax_sharpe.set_title('RISK-ADJUSTED RETURN', fontsize=13, fontweight='700', pad=15, color=COLORS['accent_orange'], fontfamily='monospace'); ax_sharpe.grid(True, alpha=0.2, linestyle='--', linewidth=0.5, color=COLORS['grid']); ax_sharpe.tick_params(colors=COLORS['text_secondary']); ax_sharpe.spines['bottom'].set_color(COLORS['border']); ax_sharpe.spines['top'].set_color(COLORS['border']); ax_sharpe.spines['left'].set_color(COLORS['border']); ax_sharpe.spines['right'].set_color(COLORS['border'])
                     legend = ax_sharpe.legend(loc='best', frameon=True, facecolor=COLORS['bg_panel'], edgecolor=COLORS['border'], fontsize=9); [text.set_color(COLORS['text_primary']) for text in legend.get_texts()]
                     ax_sharpe.axhline(0, color=COLORS['text_secondary'], linestyle='--', alpha=0.5, linewidth=1.5); fig_sharpe.tight_layout(); st.pyplot(fig_sharpe)
-                else: st.warning("Insufficient Sharpe data")
-            else: st.warning("No data to display")
+                else: st.warning("Données Sharpe insuffisantes")
+            else: st.warning("Aucune donnée à afficher")
         with subtab3:
             st.markdown("### CORRELATION MATRIX"); st.caption("Calculated over full historical period")
             if corr_matrix is not None and not corr_matrix.empty:
@@ -939,7 +1560,11 @@ with tab3:
 
 # --- Footer Bloomberg Style ---
 st.markdown("---")
-col1, col2, col3 = st.columns(3)
-with col1: st.caption("M2 MBFA TERMINAL")
-with col2: st.caption(f"{datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
-with col3: st.caption("v2.8 ACTIVE WEIGHT") # Version mise à jour
+st.markdown(f"""
+<div class="footer-terminal">
+    <strong>M2 MBFA TERMINAL</strong> | SYSTÈME D'ANALYSE DE PORTEFEUILLE PROFESSIONNEL<br>
+    SESSION: {datetime.now().strftime('%d/%m/%Y %H:%M:%S UTC')} | 
+    VERSION: <strong>v3.3 ÉDITION FRANÇAISE PREMIUM</strong><br>
+    © 2025 | Tous droits réservés
+</div>
+""", unsafe_allow_html=True)
